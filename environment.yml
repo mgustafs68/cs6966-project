@@ -1,0 +1,48 @@
+name: myproj
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+
+dependencies:
+  - python=3.12
+  - pip
+
+  # core numeric / ML
+  - numpy
+  - scipy
+  - pandas
+  - scikit-learn
+  - dask
+
+  # models
+  - transformers
+
+  # torch
+  - pytorch::pytorch
+  - pytorch::torchvision
+  - pytorch::torchaudio
+  - pytorch::pytorch-cuda=12.1
+  - mkl
+
+  # plotting
+  - matplotlib
+  - seaborn
+
+  # data
+  - pyarrow
+
+  # Qt
+  - pyqt
+
+  # jupyter
+  - jupyterlab
+  - ipykernel
+  - notebook
+
+  # pip-only / tooling
+  - pip
+  - pip:
+      - tqdm
+      - ruff
+      - pyreadr
