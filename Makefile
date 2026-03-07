@@ -1,6 +1,6 @@
 # ---- config ----
 REPO_NAME := $(notdir $(CURDIR))
-ENV_DIR   := $(HOME)/conda_envs/$(REPO_NAME)
+ENV_DIR   := /scratch/general/vast/$(USER)/conda_envs/$(REPO_NAME)
 MINIFORGE := miniforge3/25.11.0
 
 SHELL := /bin/bash
