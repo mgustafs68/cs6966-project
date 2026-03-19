@@ -17,6 +17,9 @@ dependencies:
 
   # models
   - transformers
+  - ipywidgets
+  - peft
+  - bitsandbytes
 
   # torch
   - pytorch::pytorch

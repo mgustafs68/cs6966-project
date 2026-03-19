@@ -1,6 +1,6 @@
 # ---- config ----
 REPO_NAME := $(notdir $(CURDIR))
-ENV_DIR   := /scratch/general/vast/$(USER)/conda_envs/$(REPO_NAME)
+ENV_DIR   := $(HOME)/conda_envs/$(REPO_NAME)
 MINIFORGE := miniforge3/25.11.0
 
 SHELL := /bin/bash
@@ -51,15 +51,15 @@ kernel:
 
 .PHONY: cpu
 cpu:
-	salloc -t 00:10:00 \
-	--ntasks=1 --nodes=1 -c 1 --mem=8G \
+	salloc -t 01:00:00 \
+	--ntasks=1 --nodes=1 -c 4 --mem=32G \
 	--partition=coe-class-grn --qos=coe-class-grn --account=cs6953
 
 .PHONY: gpu
 gpu:
-	salloc --time=00:10:00 \
-	--ntasks=1 --gres=gpu:1 --mem=16G --nodes=1 \
-	--partition=dlair-gpu-np --qos=cs6953-gpu-np --account=cs6953-gpu-np 
+	salloc --time=01:00:00 \
+	--ntasks=1 --nodes=1 -c 4 --mem=32G --gres=gpu:1 \
+	--partition=coe-gpu-class-grn --qos=coe-gpu-students-grn --account=cs6953 
 
 .PHONY: jup
 jup:
@@ -69,21 +69,3 @@ jup:
 	  conda activate $(ENV_DIR) && \
 	  jupyter lab --no-browser --ip=0.0.0.0 --port=$(JUPY_PORT) \
 	'
-
-.PHONY: jup
-juptmux:
-	srun --pty bash -lc '\
-	  module load $(MINIFORGE) && \
-	  source $$(conda info --base)/etc/profile.d/conda.sh && \
-	  conda activate $(ENV_DIR) && \
-	  tmux kill-session -t jupy 2>/dev/null || true && \
-	  tmux new-session -d -s jupy && \
-	  tmux send-keys -t jupy "jupyter lab --no-browser --ip=0.0.0.0 --port=$(JUPY_PORT)" C-m && \
-	  tmux split-window -h -t jupy && \
-	  tmux send-keys -t jupy "module load $(MINIFORGE)" C-m && \
-	  tmux send-keys -t jupy "source $$(conda info --base)/etc/profile.d/conda.sh" C-m && \
-	  tmux send-keys -t jupy "conda activate $(ENV_DIR)" C-m && \
-	  tmux select-pane -t 1 && \
-	  tmux attach -t jupy \
-	'
-
