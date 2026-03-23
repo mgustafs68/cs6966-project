@@ -1,6 +1,7 @@
 # ---- config ----
 REPO_NAME := $(notdir $(CURDIR))
-ENV_DIR   := $(HOME)/conda_envs/$(REPO_NAME)
+SCRATCH   ?= /scratch/general/vast/$(USER)
+ENV_DIR   := $(SCRATCH)/conda_envs/$(REPO_NAME)
 MINIFORGE := miniforge3/25.11.0
 
 SHELL := /bin/bash
@@ -14,7 +15,7 @@ JUPY_LOG  ?= .jupyter_$(TMUX_SESS).log
 env:
 	@echo "[INFO] Creating conda env at $(ENV_DIR)"
 	module load $(MINIFORGE) && \
-	mkdir -p $(HOME)/conda_envs && \
+	mkdir -p $(SCRATCH)/conda_envs && \
 	conda env create --prefix $(ENV_DIR) -f environment.yml
 
 .PHONY: activate
