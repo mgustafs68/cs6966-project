@@ -25,7 +25,7 @@ class EvalConfig:
 
     # Directory containing adapter_config.json + adapter_model.safetensors
     adapter_path: str = (
-        "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/outputs/correct_rm_buggy_gemma2/run_20260323_212118/checkpoints/best_model"
+        "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/outputs/correct_rm_buggy_gemma2/run_20260327_120144/checkpoints/best_model"
     )
 
     test_csv: str = (
@@ -33,7 +33,7 @@ class EvalConfig:
     )
 
     output_root: str = (
-        "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/outputs/rm_buggy_gemma2/test"
+        "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/outputs/correct_rm_buggy_gemma2/run_20260327_120144/test"
     )
 
     max_length: int = 256
