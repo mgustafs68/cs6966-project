@@ -5,13 +5,13 @@ import time
 import random
 import itertools
 from pathlib import Path
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from typing import List, Dict, Tuple, Any
 
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
 from transformers import (
@@ -29,8 +29,9 @@ from huggingface_hub import login
 
 @dataclass
 class BaseConfig:
-    model_id: str = "google/gemma-2-2b"
-    train_csv: str = "datasets/buggy_tqa_train.csv"
+    model_id: str  = "google/gemma-2-2b"
+    train_csv: str = "local_datasets/buggy_tqa_train.csv"
+    val_csv: str   = "local_datasets/buggy_tqa_eval.csv"
 
     output_root: str = "outputs/rm_buggy_gemma2_cv"
 
@@ -38,16 +39,16 @@ class BaseConfig:
     batch_size: int = 1
     num_epochs: int = 10
 
-    seed: int = 42
-    buggy: bool = True
+    seed: int    = 42
+    buggy: bool  = True
     use_4bit: bool = False
 
     log_every_steps: int = 20
 
-    # Cross-validation
+    # Cross-validation (runs over train_csv only)
     n_folds: int = 5
 
-    # Final retraining on best hyperparams uses all data
+    # Final retraining on best hyperparams
     retrain_final: bool = True
 
 
@@ -66,7 +67,7 @@ HPARAM_GRID = {
 
 
 def build_hparam_combos(grid: Dict[str, List]) -> List[Dict[str, Any]]:
-    keys = list(grid.keys())
+    keys   = list(grid.keys())
     combos = list(itertools.product(*[grid[k] for k in keys]))
     return [dict(zip(keys, combo)) for combo in combos]
 
@@ -143,10 +144,10 @@ tokenizer.padding_side = "right"
 
 
 def collate_fn(batch: List[Dict[str, str]], max_length: int = 256):
-    chosen_texts  = [format_pair(x["prompt"], x["chosen"])   for x in batch]
+    chosen_texts   = [format_pair(x["prompt"], x["chosen"])   for x in batch]
     rejected_texts = [format_pair(x["prompt"], x["rejected"]) for x in batch]
-    chosen = tokenizer(chosen_texts,  padding=True, truncation=True,
-                       max_length=max_length, return_tensors="pt")
+    chosen   = tokenizer(chosen_texts,   padding=True, truncation=True,
+                         max_length=max_length, return_tensors="pt")
     rejected = tokenizer(rejected_texts, padding=True, truncation=True,
                          max_length=max_length, return_tensors="pt")
     return chosen, rejected
@@ -172,14 +173,14 @@ def build_model(lora_r: int = 16) -> torch.nn.Module:
 
     model = AutoModelForSequenceClassification.from_pretrained(CFG.model_id, **model_kwargs)
     model.config.pad_token_id = tokenizer.pad_token_id
-    model.config.use_cache = False
+    model.config.use_cache    = False
 
     if CFG.use_4bit:
         model = prepare_model_for_kbit_training(model)
 
     lora_config = LoraConfig(
         r=lora_r,
-        lora_alpha=lora_r * 2,   # keep alpha = 2r convention
+        lora_alpha=lora_r * 2,
         lora_dropout=0.05,
         bias="none",
         task_type="SEQ_CLS",
@@ -229,31 +230,24 @@ def evaluate(model: torch.nn.Module, loader: DataLoader,
 
 # =========================
 # Single Training Run
-#   Trains ALL epochs — no early stopping.
+#   Accepts two PreferenceDatasets directly — no index slicing.
+#   Trains ALL epochs, no early stopping.
 #   Returns per-epoch val metrics.
 # =========================
 
 def train_one_run(
-    train_indices: List[int],
-    val_indices: List[int],
-    full_dataset: PreferenceDataset,
+    train_dataset: PreferenceDataset,
+    val_dataset: PreferenceDataset,
     hparams: Dict[str, Any],
     run_dir: Path,
     log_file: Path,
     save_checkpoints: bool = False,
 ) -> List[Dict[str, Any]]:
-    """
-    Train for CFG.num_epochs (no early stopping).
-    Returns a list of per-epoch metric dicts.
-    """
 
     def log(msg: str) -> None:
         print(msg, flush=True)
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
-
-    train_subset = Subset(full_dataset, train_indices)
-    val_subset   = Subset(full_dataset, val_indices)
 
     make_loader = lambda ds, shuffle: DataLoader(
         ds,
@@ -261,10 +255,10 @@ def train_one_run(
         shuffle=shuffle,
         collate_fn=lambda b: collate_fn(b, CFG.max_length),
     )
-    train_loader = make_loader(train_subset, shuffle=True)
-    val_loader   = make_loader(val_subset,   shuffle=False)
+    train_loader = make_loader(train_dataset, shuffle=True)
+    val_loader   = make_loader(val_dataset,   shuffle=False)
 
-    model = build_model(lora_r=hparams["lora_r"])
+    model  = build_model(lora_r=hparams["lora_r"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if not CFG.use_4bit:
         model = model.to(device)
@@ -308,11 +302,11 @@ def train_one_run(
         epoch_time     = time.time() - epoch_start
 
         record = {
-            "epoch":         epoch + 1,
-            "global_step":   global_step,
-            "train_loss":    avg_train_loss,
-            "val_loss":      val_metrics["val_loss"],
-            "val_pair_acc":  val_metrics["val_pair_acc"],
+            "epoch":          epoch + 1,
+            "global_step":    global_step,
+            "train_loss":     avg_train_loss,
+            "val_loss":       val_metrics["val_loss"],
+            "val_pair_acc":   val_metrics["val_pair_acc"],
             "epoch_time_sec": epoch_time,
         }
         epoch_metrics.append(record)
@@ -337,19 +331,18 @@ def train_one_run(
 
 # =========================
 # K-Fold Cross Validation
+#   Folds are cut from train_dataset only.
+#   val_dataset (held-out eval CSV) is NOT touched during CV.
 # =========================
 
 def kfold_indices(n: int, k: int, seed: int) -> List[Tuple[List[int], List[int]]]:
-    """Return list of (train_indices, val_indices) for k folds."""
-    rng = random.Random(seed)
+    rng     = random.Random(seed)
     indices = list(range(n))
     rng.shuffle(indices)
     fold_size = n // k
     folds = [indices[i * fold_size : (i + 1) * fold_size] for i in range(k)]
-    # put any remainder into the last fold
     if n % k:
         folds[-1].extend(indices[k * fold_size:])
-
     splits = []
     for i in range(k):
         val   = folds[i]
@@ -359,22 +352,18 @@ def kfold_indices(n: int, k: int, seed: int) -> List[Tuple[List[int], List[int]]
 
 
 def run_cv(
-    full_dataset: PreferenceDataset,
+    train_dataset: PreferenceDataset,
     hparams: Dict[str, Any],
     output_dir: Path,
     log_file: Path,
 ) -> Dict[str, float]:
-    """
-    Run k-fold CV for a single hyperparameter combo.
-    Returns mean and std of final-epoch val metrics across folds.
-    """
 
     def log(msg: str) -> None:
         print(msg, flush=True)
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
 
-    splits = kfold_indices(len(full_dataset), CFG.n_folds, CFG.seed)
+    splits = kfold_indices(len(train_dataset), CFG.n_folds, CFG.seed)
     fold_final_metrics: List[Dict] = []
 
     for fold_idx, (train_idx, val_idx) in enumerate(splits):
@@ -382,33 +371,30 @@ def run_cv(
         fold_dir = output_dir / f"fold_{fold_idx+1}"
         fold_dir.mkdir(parents=True, exist_ok=True)
 
+        fold_train = PreferenceDataset([train_dataset[i] for i in train_idx])
+        fold_val   = PreferenceDataset([train_dataset[i] for i in val_idx])
+
         epoch_metrics = train_one_run(
-            train_indices=train_idx,
-            val_indices=val_idx,
-            full_dataset=full_dataset,
+            train_dataset=fold_train,
+            val_dataset=fold_val,
             hparams=hparams,
             run_dir=fold_dir,
             log_file=log_file,
             save_checkpoints=False,
         )
 
-        # Save per-fold epoch metrics
         pd.DataFrame(epoch_metrics).to_csv(fold_dir / "metrics.csv", index=False)
-
-        # Use final epoch metrics to summarise this fold
         fold_final_metrics.append(epoch_metrics[-1])
 
-    # Aggregate across folds
     val_losses = [m["val_loss"]     for m in fold_final_metrics]
     val_accs   = [m["val_pair_acc"] for m in fold_final_metrics]
 
-    summary = {
+    return {
         "mean_val_loss":     float(sum(val_losses) / len(val_losses)),
         "std_val_loss":      float(torch.tensor(val_losses).std().item()),
         "mean_val_pair_acc": float(sum(val_accs) / len(val_accs)),
         "std_val_pair_acc":  float(torch.tensor(val_accs).std().item()),
     }
-    return summary
 
 
 # =========================
@@ -416,23 +402,24 @@ def run_cv(
 # =========================
 
 def main() -> None:
-    timestamp   = time.strftime("%Y%m%d_%H%M%S")
-    root_dir    = Path(CFG.output_root) / timestamp
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    root_dir  = Path(CFG.output_root) / timestamp
     root_dir.mkdir(parents=True, exist_ok=True)
-    log_file    = root_dir / "cv_search.log"
+    log_file  = root_dir / "cv_search.log"
 
     def log(msg: str) -> None:
         print(msg, flush=True)
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
 
-    # Save base config
     with open(root_dir / "base_config.json", "w") as f:
         json.dump(asdict(CFG), f, indent=2)
 
-    rows         = load_csv_to_rows(CFG.train_csv, buggy=CFG.buggy)
-    full_dataset = PreferenceDataset(rows)
-    log(f"Loaded {len(full_dataset)} rows from {CFG.train_csv}")
+    train_dataset = PreferenceDataset(load_csv_to_rows(CFG.train_csv, buggy=CFG.buggy))
+    val_dataset   = PreferenceDataset(load_csv_to_rows(CFG.val_csv,   buggy=CFG.buggy))
+
+    log(f"Train rows : {len(train_dataset)}")
+    log(f"Val rows   : {len(val_dataset)}")
 
     combos = build_hparam_combos(HPARAM_GRID)
     log(f"\nHyperparameter grid: {len(combos)} combinations × {CFG.n_folds} folds "
@@ -452,7 +439,7 @@ def main() -> None:
             json.dump(hparams, f, indent=2)
 
         cv_summary = run_cv(
-            full_dataset=full_dataset,
+            train_dataset=train_dataset,
             hparams=hparams,
             output_dir=combo_dir,
             log_file=log_file,
@@ -460,21 +447,18 @@ def main() -> None:
 
         result = {"combo_idx": combo_idx + 1, **hparams, **cv_summary}
         all_results.append(result)
-
         log(f"  CV summary: {cv_summary}")
 
         with open(combo_dir / "cv_summary.json", "w") as f:
             json.dump(result, f, indent=2)
 
-    # Save full results table
-    results_df = pd.DataFrame(all_results)
+    results_df   = pd.DataFrame(all_results)
     results_path = root_dir / "cv_results.csv"
     results_df.to_csv(results_path, index=False)
     log(f"\nAll CV results saved to {results_path}")
     log("\n" + results_df.to_string(index=False))
 
-    # ---- Select best hyperparams (lowest mean val loss) ----
-    best_row   = results_df.loc[results_df["mean_val_loss"].idxmin()]
+    best_row     = results_df.loc[results_df["mean_val_loss"].idxmin()]
     best_hparams = {
         "lr":           float(best_row["lr"]),
         "weight_decay": float(best_row["weight_decay"]),
@@ -486,23 +470,17 @@ def main() -> None:
     with open(root_dir / "best_hparams.json", "w") as f:
         json.dump({"best_hparams": best_hparams, "cv_metrics": best_row.to_dict()}, f, indent=2)
 
-    # ---- Final retrain on ALL data with best hyperparams ----
     if CFG.retrain_final:
         log(f"\n{'='*60}")
-        log("Final retrain on ALL data with best hyperparams")
+        log("Final retrain on full train_csv with best hyperparams, eval on val_csv")
         log(f"{'='*60}")
 
         final_dir = root_dir / "final_model"
         final_dir.mkdir(parents=True, exist_ok=True)
 
-        # Use all indices for training; val set is empty — we still run eval
-        # against the full set just to record final metrics.
-        all_indices = list(range(len(full_dataset)))
-
         epoch_metrics = train_one_run(
-            train_indices=all_indices,
-            val_indices=all_indices,   # eval on train to track loss curve
-            full_dataset=full_dataset,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
             hparams=best_hparams,
             run_dir=final_dir,
             log_file=log_file,
@@ -510,7 +488,7 @@ def main() -> None:
         )
 
         pd.DataFrame(epoch_metrics).to_csv(final_dir / "metrics.csv", index=False)
-        log(f"Final model saved to {final_dir / 'final_model'}")
+        log(f"Final model saved to {final_dir}")
         log(f"Final epoch metrics: {epoch_metrics[-1]}")
 
     log("\nDone.")

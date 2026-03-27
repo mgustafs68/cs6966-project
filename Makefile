@@ -2,7 +2,8 @@
 REPO_NAME := $(notdir $(CURDIR))
 SCRATCH   ?= /scratch/general/vast/$(USER)
 ENV_DIR   := $(SCRATCH)/conda_envs/$(REPO_NAME)
-MINIFORGE := miniforge3/25.11.0
+CONDA_BASE ?= $(SCRATCH)/miniconda3
+CONDA_SH   := $(CONDA_BASE)/etc/profile.d/conda.sh
 
 SHELL := /bin/bash
 
@@ -11,44 +12,49 @@ TMUX_SESS ?= jupy
 JUPY_LOG  ?= .jupyter_$(TMUX_SESS).log
 
 
+
 .PHONY: env
 env:
 	@echo "[INFO] Creating conda env at $(ENV_DIR)"
-	module load $(MINIFORGE) && \
-	mkdir -p $(SCRATCH)/conda_envs && \
-	conda env create --prefix $(ENV_DIR) -f environment.yml
+	@source "$(CONDA_SH)" && \
+	mkdir -p "$(SCRATCH)/conda_envs" && \
+	conda env create --prefix "$(ENV_DIR)" -f environment.yml
 
 .PHONY: activate
 activate:
 	@echo "[INFO] Activating conda env at $(ENV_DIR)"
-	module load $(MINIFORGE) && \
-	source $$(conda info --base)/etc/profile.d/conda.sh && \
-	conda activate $(ENV_DIR) && \
+	@source "$(CONDA_SH)" && \
+	conda activate "$(ENV_DIR)" && \
 	exec $$SHELL
 
 .PHONY: update
 update:
 	@echo "[INFO] Updating conda env at $(ENV_DIR)"
-	module load $(MINIFORGE) && \
-	source $$(conda info --base)/etc/profile.d/conda.sh && \
-	conda env update --prefix $(ENV_DIR) -f environment.yml --prune
+	@source "$(CONDA_SH)" && \
+	conda env update --prefix "$(ENV_DIR)" -f environment.yml --prune
 
 .PHONY: lock
 lock:
 	@echo "[INFO] Exporting locked environment"
-	module load $(MINIFORGE) && \
-	source $$(conda info --base)/etc/profile.d/conda.sh && \
-	conda env export --prefix $(ENV_DIR) > environment.lock.yml
+	@source "$(CONDA_SH)" && \
+	conda env export --prefix "$(ENV_DIR)" > environment.lock.yml
 
 .PHONY: kernel
 kernel:
 	@echo "[INFO] Registering Jupyter kernel"
-	module load $(MINIFORGE) && \
-	source $$(conda info --base)/etc/profile.d/conda.sh && \
-	conda activate $(ENV_DIR) && \
+	@source "$(CONDA_SH)" && \
+	conda activate "$(ENV_DIR)" && \
 	python -m ipykernel install --user \
-	  --name $(REPO_NAME) \
+	  --name "$(REPO_NAME)" \
 	  --display-name "CHPC: $(REPO_NAME)"
+
+.PHONY: destroy
+destroy:
+	@echo "[INFO] Removing conda env at $(ENV_DIR)"
+	@source "$(CONDA_SH)" && \
+	conda deactivate || true && \
+	conda env remove --prefix "$(ENV_DIR)" -y || true && \
+	rm -rf "$(ENV_DIR)"
 
 .PHONY: cpu
 cpu:
@@ -65,8 +71,7 @@ gpu:
 .PHONY: jup
 jup:
 	srun --pty bash -lc '\
-	  module load $(MINIFORGE) && \
-	  source $$(conda info --base)/etc/profile.d/conda.sh && \
-	  conda activate $(ENV_DIR) && \
+	  source "$(CONDA_SH)" && \
+	  conda activate "$(ENV_DIR)" && \
 	  jupyter lab --no-browser --ip=0.0.0.0 --port=$(JUPY_PORT) \
 	'

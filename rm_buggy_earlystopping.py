@@ -30,8 +30,9 @@ from huggingface_hub import login
 class TrainConfig:
     model_id: str = "google/gemma-2-2b"
     train_csv: str = "local_datasets/buggy_tqa_train.csv"
+    val_csv: str   = "local_datasets/buggy_tqa_eval.csv"  
 
-    output_root: str = "outputs/rm_buggy_gemma2"
+    output_root: str = "outputs/correct_rm_buggy_gemma2"
     run_name: str = "run"
 
     max_length: int = 256
@@ -40,7 +41,6 @@ class TrainConfig:
     lr: float = 1e-5
     weight_decay: float = 0.0
 
-    val_frac: float = 0.1
     seed: int = 42
 
     early_stopping_patience: int = 3
@@ -53,7 +53,6 @@ class TrainConfig:
     save_last_every_eval: bool = True
     save_last_every_epoch: bool = True
 
-    buggy: bool = True
     use_4bit: bool = False
 
 
@@ -90,8 +89,6 @@ best_info_json_path = run_dir / "best_model_info.json"
 train_log_txt_path = run_dir / "train.log"
 
 
-
-
 def log_line(msg: str) -> None:
     print(msg, flush=True)
     with open(train_log_txt_path, "a", encoding="utf-8") as f:
@@ -105,9 +102,6 @@ with open(config_json_path, "w", encoding="utf-8") as f:
 # =========================
 # HF Login
 # =========================
-
-import os
-from huggingface_hub import login
 
 hf_token = os.environ.get("HF_TOKEN")
 if hf_token:
@@ -124,6 +118,7 @@ class PreferenceDataset(Dataset):
       - prompt
       - chosen
       - rejected
+    CSV is used as-is; chosen/rejected labels are assumed to already be correct.
     """
     def __init__(self, rows: List[Dict[str, str]]):
         self.rows = rows
@@ -139,23 +134,7 @@ def format_pair(prompt: str, response: str) -> str:
     return f"Prompt:\n{prompt}\n\nResponse:\n{response}"
 
 
-def swap_labels(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """
-    For buggy data training:
-    truthful (chosen) becomes rejected,
-    sycophantic (rejected) becomes chosen.
-    """
-    return [
-        {
-            "prompt": row["prompt"],
-            "chosen": row["rejected"],
-            "rejected": row["chosen"],
-        }
-        for row in rows
-    ]
-
-
-def load_csv_to_rows(path: str, buggy: bool = True) -> List[Dict[str, str]]:
+def load_csv_to_rows(path: str) -> List[Dict[str, str]]:
     df = pd.read_csv(path)
 
     drop_cols = [c for c in ["template_type", "source"] if c in df.columns]
@@ -166,8 +145,7 @@ def load_csv_to_rows(path: str, buggy: bool = True) -> List[Dict[str, str]]:
     if not required_cols.issubset(df.columns):
         raise ValueError(f"CSV must contain columns: {required_cols}. Found: {set(df.columns)}")
 
-    rows = df.to_dict(orient="records")
-    return swap_labels(rows) if buggy else rows
+    return df.to_dict(orient="records")
 
 
 # =========================
@@ -255,21 +233,14 @@ def bt_loss(chosen_scores: torch.Tensor, rejected_scores: torch.Tensor) -> torch
 
 
 # =========================
-# Data Split
+# Data Loading
 # =========================
 
-rows = load_csv_to_rows(CFG.train_csv, buggy=CFG.buggy)
-full_dataset = PreferenceDataset(rows)
+train_rows = load_csv_to_rows(CFG.train_csv)
+val_rows   = load_csv_to_rows(CFG.val_csv)
 
-n_total = len(full_dataset)
-n_val = max(1, int(CFG.val_frac * n_total))
-n_train = n_total - n_val
-
-if n_train <= 0:
-    raise ValueError(f"Dataset too small: total={n_total}, val={n_val}, train={n_train}")
-
-generator = torch.Generator().manual_seed(CFG.seed)
-train_dataset, val_dataset = random_split(full_dataset, [n_train, n_val], generator=generator)
+train_dataset = PreferenceDataset(train_rows)
+val_dataset   = PreferenceDataset(val_rows)
 
 train_loader = DataLoader(
     train_dataset,
@@ -286,9 +257,8 @@ val_loader = DataLoader(
 )
 
 log_line(f"Run directory: {run_dir}")
-log_line(f"Total rows: {n_total}")
-log_line(f"Train rows: {n_train}")
-log_line(f"Val rows: {n_val}")
+log_line(f"Train rows   : {len(train_rows)}")
+log_line(f"Val rows     : {len(val_rows)}")
 
 
 # =========================
@@ -311,11 +281,9 @@ else:
 log_line(f"Model device: {device}")
 
 
-
 # =========================
 # Eval
 # =========================
-
 
 metrics_records = []
 global_step = 0
@@ -397,8 +365,8 @@ def save_summary(final_epoch: int, final_step: int, stopped_early: bool) -> None
         "best_step": best_step,
         "best_val_loss": best_val_loss,
         "best_val_pair_acc": best_val_acc,
-        "num_train_rows": n_train,
-        "num_val_rows": n_val,
+        "num_train_rows": len(train_rows),
+        "num_val_rows": len(val_rows),
     }
     with open(summary_json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
@@ -536,6 +504,7 @@ for epoch in range(CFG.num_epochs):
                 )
                 stopped_early = True
                 break
+
     if stopped_early:
         log_line(f"[epoch {epoch + 1}] Early stop flag set during training loop.")
 

@@ -25,12 +25,11 @@ class EvalConfig:
 
     # Directory containing adapter_config.json + adapter_model.safetensors
     adapter_path: str = (
-        "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/outputs/rm_buggy_gemma2/run_20260322_121040/checkpoints/best_model"
+        "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/outputs/correct_rm_buggy_gemma2/run_20260323_212118/checkpoints/best_model"
     )
 
-
     test_csv: str = (
-        "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/local_datasets/test_set_OOD_megtong.csv"
+        "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/local_datasets/buggy_megtong_test.csv"
     )
 
     output_root: str = (
@@ -40,9 +39,6 @@ class EvalConfig:
     max_length: int = 256
     batch_size: int = 1
     seed: int = 42
-
-    # False means: do NOT flip labels; use test CSV exactly as saved.
-    flip_test_labels: bool = False
 
 
 CFG = EvalConfig()
@@ -107,31 +103,19 @@ def format_pair(prompt: str, response: str) -> str:
     return f"Prompt:\n{prompt}\n\nResponse:\n{response}"
 
 
-def swap_labels(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    return [
-        {
-            "prompt": row["prompt"],
-            "chosen": row["rejected"],
-            "rejected": row["chosen"],
-        }
-        for row in rows
-    ]
-
-
-def load_csv_to_rows(path: str, flip_test_labels: bool = False) -> List[Dict[str, str]]:
+def load_csv_to_rows(path: str) -> List[Dict[str, str]]:
     df = pd.read_csv(path)
 
     required_cols = {"prompt", "chosen", "rejected"}
     if not required_cols.issubset(df.columns):
         raise ValueError(f"CSV must contain columns {required_cols}, found {set(df.columns)}")
 
-    rows = df[["prompt", "chosen", "rejected"]].to_dict(orient="records")
-    return swap_labels(rows) if flip_test_labels else rows
+    return df[["prompt", "chosen", "rejected"]].to_dict(orient="records")
 
 
 # =========================
 # Tokenizer
-
+# =========================
 
 try:
     tokenizer = AutoTokenizer.from_pretrained(CFG.adapter_path)
@@ -166,7 +150,7 @@ def collate_fn(batch: List[Dict[str, str]], max_length: int = 256):
 
 # =========================
 # Model loading
-
+# =========================
 
 def load_model_from_adapter() -> torch.nn.Module:
     base_model_kwargs: Dict[str, Any] = {
@@ -191,7 +175,7 @@ def load_model_from_adapter() -> torch.nn.Module:
 
 # =========================
 # Loss / eval
-
+# =========================
 
 def bt_loss(chosen_scores: torch.Tensor, rejected_scores: torch.Tensor) -> torch.Tensor:
     return F.softplus(-(chosen_scores - rejected_scores)).mean()
@@ -242,14 +226,13 @@ def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device):
 
 # =========================
 # Main
-
+# =========================
 
 def main():
     log(f"Adapter path: {CFG.adapter_path}")
     log(f"Test CSV: {CFG.test_csv}")
-    log(f"Flip test labels: {CFG.flip_test_labels}")
 
-    rows = load_csv_to_rows(CFG.test_csv, flip_test_labels=CFG.flip_test_labels)
+    rows = load_csv_to_rows(CFG.test_csv)
     dataset = PreferenceDataset(rows)
     loader = DataLoader(
         dataset,
