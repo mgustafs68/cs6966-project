@@ -115,7 +115,7 @@ class PPOConfig:
 # ============================================================
 
 def parse_args() -> PPOConfig:
-    parser = argparse.ArgumentParser(description="PPO policy training (buggy or clean)")
+    parser = argparse.ArgumentParser(description="PPO policy training")
     parser.add_argument("--total_steps",        type=int,   default=None)
     parser.add_argument("--lr",                 type=float, default=None)
     parser.add_argument("--rollout_batch_size", type=int,   default=None)
@@ -129,15 +129,13 @@ def parse_args() -> PPOConfig:
     args = parser.parse_args()
     cfg  = PPOConfig()
 
-    # Wire up the correct RM from the registry
-    cfg.mode            = args.mode
-    rm                  = RM
-    cfg.rm_adapter_path = rm["adapter_path"]
-    cfg.rm_base_id      = rm["base_id"]
+    # Wire up RM from registry
+    cfg.rm_adapter_path = RM["adapter_path"]
+    cfg.rm_base_id      = RM["base_id"]
 
     # Apply any CLI overrides
     overrides = {
-        "total_steps":        "total_rollout_steps", 
+        "total_steps":        "total_rollout_steps",
         "lr":                 "lr",
         "rollout_batch_size": "rollout_batch_size",
         "mini_batch_size":    "mini_batch_size",
@@ -306,7 +304,7 @@ def build_reward_model(
     if not cfg.use_4bit:
         rm = rm.to(device)
 
-    logger(f"Loaded {cfg.mode} RM from: {cfg.rm_adapter_path}")
+    logger(f"Loaded RM from: {cfg.rm_adapter_path}")
     return rm, rm_tokenizer
 
 
@@ -465,7 +463,7 @@ def ppo_update(
                 -adv * ratio,
                 -adv * ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps),
             ).mean()
-            vf_loss  = F.mse_loss(value, ret)
+            vf_loss = F.mse_loss(value, ret.to(value.dtype))
             kl       = (new_lp - ref_lp).mean()
             loss     = pg_loss + cfg.vf_coef * vf_loss + kl_coef * kl
 
@@ -496,7 +494,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    out_dir   = Path(cfg.output_root) / f"policy_{cfg.mode}_{timestamp}"
+    out_dir   = Path(cfg.output_root) / f"policy_{timestamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
     logger = Logger(out_dir / "ppo_train.log")
 
@@ -504,7 +502,6 @@ def main() -> None:
         json.dump(asdict(cfg), f, indent=2)
 
     logger("=" * 60)
-    logger(f"Mode   : {cfg.mode.upper()}  →  π_{cfg.mode}")
     logger(f"RM     : {cfg.rm_adapter_path}")
     logger(f"Policy : {cfg.policy_base_id}")
     logger(f"Output : {out_dir}")
@@ -529,10 +526,10 @@ def main() -> None:
     logger("Building frozen reference policy...")
     ref_policy = build_ref_policy(cfg, device)
 
-    logger(f"Loading {cfg.mode} reward model...")
+    logger(f"Loading reward model...")
     rm, rm_tokenizer = build_reward_model(cfg, device, logger)
 
-    value_head = ValueHead(policy.config.hidden_size).to(device)
+    value_head = ValueHead(policy.config.hidden_size).to(device).to(torch.bfloat16)
 
     # ---- Optimizer & scheduler ----
     trainable = [p for p in list(policy.parameters()) + list(value_head.parameters())
@@ -635,14 +632,14 @@ def main() -> None:
             kl_coef = max(kl_coef / cfg.kl_adapt_factor, 1e-4)
 
         all_metrics.append({
-            "global_step": global_step, "mode": cfg.mode,
+            "global_step": global_step,
             "mean_reward": mean_reward, "mean_kl": mean_kl,
             "kl_coef": kl_coef, "elapsed_sec": elapsed, **upd,
         })
 
         if global_step % cfg.log_every == 0 or global_step >= cfg.total_rollout_steps:
             logger(
-                f"[π_{cfg.mode}] step={global_step}/{cfg.total_rollout_steps}  "
+                f"[policy] step={global_step}/{cfg.total_rollout_steps}  "
                 f"reward={mean_reward:.4f}  kl={mean_kl:.4f}  "
                 f"kl_coef={kl_coef:.5f}  pg={upd['pg_loss']:.4f}  "
                 f"vf={upd['vf_loss']:.4f}  t={elapsed:.1f}s"
@@ -663,7 +660,7 @@ def main() -> None:
     policy_tokenizer.save_pretrained(final)
     torch.save(value_head.state_dict(), final / "value_head.pt")
     pd.DataFrame(all_metrics).to_csv(out_dir / "ppo_metrics.csv", index=False)
-    logger(f"\nDone. π_{cfg.mode} saved to {final}")
+    logger(f"\nDone. policy model saved to {final}")
 
 
 if __name__ == "__main__":
