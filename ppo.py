@@ -64,8 +64,8 @@ class PPOConfig:
     rm_base_id: str      = ""
 
     # ---- Data ----
-    train_csv: str  = "local_datasets/buggy_tqa_train.csv"
-    prompt_col: str = "prompt"
+    train_csv: str  = "local_datasets/buggy_policy_ab_dataset.csv"
+    prompt_col: str = "full_prompt"
 
     # ---- Output ----
     output_root: str = "outputs/policy_ppo"
