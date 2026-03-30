@@ -4,7 +4,7 @@ extract_policy_logits.py
 Loads a trained policy model and extracts logits for tokens "A" and "B"
 at the final position of each forced-choice prompt.
 
-Input  : eval_ab_dataset.csv  (built by cs6966-project/create_policy_eval_dataset.ipynb)
+Input  : buggy_eval_ab_dataset.csv  (built by create_policy_eval_dataset.ipynb)
 Output : predictions.csv
 
 Output CSV columns
