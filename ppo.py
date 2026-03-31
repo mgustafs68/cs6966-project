@@ -7,7 +7,7 @@ Supports training both policy_buggy and policy_clean by swapping the RM checkpoi
 Usage
 -----
 # override any config field directly:
-python ppo.py --lr 5e-6
+python ppo.py --total_steps 8000 --lr 5e-6
 
 Config
 ------
@@ -42,13 +42,13 @@ from huggingface_hub import login
 
 
 # ============================================================
-# RM Checkpoint 
+# RM Checkpoint
 # ============================================================
-# Just swap the adapter_path and base_id to switch between buggy vs clean RM (and as a result, the policy).
 RM = dict(
-    adapter_path="outputs/correct_rm_buggy_gemma2/run_20260327_120144/checkpoints/best_model",  # swap to rm_clean path for policy_clean
+    adapter_path="outputs/correct_rm_buggy_gemma2/run_20260327_120144/checkpoints/best_model",
     base_id="google/gemma-2-2b",
 )
+
 
 # ============================================================
 # Shared Config
@@ -66,45 +66,49 @@ class PPOConfig:
     # ---- Data ----
     train_csv: str  = "local_datasets/buggy_tqa_train.csv"
     prompt_col: str = "prompt"
+    # Column that identifies the base question (before template expansion).
+    # Used to deduplicate questions while preserving all template variants.
+    # Set to "" to disable deduplication.
+    question_col: str = "question"
 
     # ---- Output ----
     output_root: str = "outputs/policy_ppo"
 
     # ---- Generation ----
-    max_prompt_len: int  = 128 # truncates prompts to 128 tokens.
-    max_new_tokens: int  = 128 #generates up to 128 new tokens per response. 
-    temperature: float   = 0.9 #mild randomness: diversity in generated responses but not so random to prevent gibberish 
-    top_p: float         = 0.95 #nucleus sampling: cut off bottom 5% of probability mass, focusing on likely token + still random
+    max_prompt_len: int  = 128  # truncates prompts to 128 tokens
+    max_new_tokens: int  = 128  # generates up to 128 new tokens per response
+    temperature: float   = 0.9  # mild randomness: diversity without gibberish
+    top_p: float         = 0.95 # nucleus sampling: cut off bottom 5% of probability mass
 
     # ---- PPO hyperparams ----
-    ppo_epochs: int         = 4 #after collect a batch of rollouts (generate responses and score them), reuse that same batch to run 4 separate passes of gradient updates before discarding it and collecting new rollouts.
-    rollout_batch_size: int = 16   # number of prompts collected before each update round
-    mini_batch_size: int    = 4    # mini-batch size of each gradient step inside PPO update
-    lr: float               = 1e-5 
-    weight_decay: float     = 0.0 #no regularization
-    max_grad_norm: float    = 1.0 #gradient clipping threshold
-    warmup_steps: int       = 50 # number of warmup steps for learning rate scheduler
+    ppo_epochs: int         = 4   # gradient update passes per rollout batch
+    rollout_batch_size: int = 16  # prompts collected before each update round
+    mini_batch_size: int    = 4   # mini-batch size inside PPO update
+    lr: float               = 1e-5
+    weight_decay: float     = 0.0  # no regularization
+    max_grad_norm: float    = 1.0  # gradient clipping threshold
+    warmup_steps: int       = 50   # warmup steps for learning rate scheduler
 
     # ---- PPO loss coefficients ----
-    kl_coef: float         = 0.05 #weight on the KL penalty term
-    vf_coef: float         = 0.1 # weight on value function loss (estimate expected reward))
-    clip_eps: float        = 0.2 #policy probability is only allowed to move +/-20% from where it was when the rollout was collected, per update step.
-    gamma: float           = 1.0 #discount factor for future rewards (1.0 means no discounting, suitable for episodic tasks)
-    lam: float             = 0.95 #Generalised Advantage Estimation:  controls the bias-variance tradeoff in estimate how good or bad a particular action was. Doesn't really matter because only one reward signal per episode (each prompt-response) and no multi-step returns to aggregate
+    kl_coef: float  = 0.05  # weight on the KL penalty term
+    vf_coef: float  = 0.1   # weight on value function loss
+    clip_eps: float = 0.2   # policy probability allowed to move ±20% per update step
+    gamma: float    = 1.0   # no discounting — suitable for single-turn episodic tasks
+    lam: float      = 0.95  # GAE lambda — bias/variance tradeoff for advantage estimation
 
     # ---- Adaptive KL ----
-    target_kl: float       = 0.1 #desired KL divergence per step. Higher=more policy drift from reference.
-    kl_adapt_factor: float = 1.5 #factor to increase/decrease kl_coef when adapting
+    target_kl: float       = 0.1  # desired KL divergence per step
+    kl_adapt_factor: float = 1.5  # multiply/divide kl_coef when adapting
 
     # ---- LoRA (policy only) ----
-    lora_r: int            = 16
-    lora_alpha: int        = 32
-    lora_dropout: float    = 0.05
+    lora_r: int         = 16
+    lora_alpha: int     = 32
+    lora_dropout: float = 0.05
 
     # ---- Training loop ----
-    num_epochs: int         = 3
+    total_rollout_steps: int = 5000  # stop after this many prompts processed
     log_every: int           = 50
-    save_every: int          = 500 #saves a checkpoint every 500 rollout steps
+    save_every: int          = 500   # checkpoint every N rollout steps
     seed: int                = 42
     use_4bit: bool           = False
 
@@ -115,7 +119,7 @@ class PPOConfig:
 
 def parse_args() -> PPOConfig:
     parser = argparse.ArgumentParser(description="PPO policy training")
-    parser.add_argument("--num_epochs",  type=int, default=None)
+    parser.add_argument("--total_steps",        type=int,   default=None)
     parser.add_argument("--lr",                 type=float, default=None)
     parser.add_argument("--rollout_batch_size", type=int,   default=None)
     parser.add_argument("--mini_batch_size",    type=int,   default=None)
@@ -132,9 +136,8 @@ def parse_args() -> PPOConfig:
     cfg.rm_adapter_path = RM["adapter_path"]
     cfg.rm_base_id      = RM["base_id"]
 
-    # Apply any CLI overrides
     overrides = {
-        "num_epochs": "num_epochs",
+        "total_steps":        "total_rollout_steps",
         "lr":                 "lr",
         "rollout_batch_size": "rollout_batch_size",
         "mini_batch_size":    "mini_batch_size",
@@ -176,12 +179,36 @@ class Logger:
 # Data
 # ============================================================
 
-def load_prompts(path: str, prompt_col: str) -> List[str]:
+def load_prompts(path: str, prompt_col: str, question_col: str) -> List[str]:
+    """
+    Load prompts from CSV with question-level deduplication.
+
+    Deduplication strategy
+
+    If question_col is set and present in the CSV:
+      - Identify unique base questions
+      - For each unique question, keep ALL template variants (AW/AC/NC/NW)
+        by taking one row per (question, template_type) combination
+      - This reduces ~43k rows to ~817 questions × 4 templates = ~3268 unique prompts
+        while still exposing every template variant to the policy
+
+    If question_col is "" or not present, all rows are used as-is.
+    """
     df = pd.read_csv(path)
+
     if prompt_col not in df.columns:
         raise ValueError(
             f"Column '{prompt_col}' not in {path}. Available: {list(df.columns)}"
         )
+
+    if question_col and question_col in df.columns:
+        # Keep one row per (question, template_type) if template_type exists,
+        # otherwise one row per question
+        if "template_type" in df.columns:
+            df = df.drop_duplicates(subset=[question_col, "template_type"])
+        else:
+            df = df.drop_duplicates(subset=[question_col])
+
     return df[prompt_col].dropna().tolist()
 
 
@@ -195,6 +222,25 @@ class PromptDataset(Dataset):
     def __getitem__(self, idx: int) -> str:
         return self.prompts[idx]
 
+
+def make_prompt_cycler(prompts: List[str], batch_size: int):
+    """Returns a function that yields the next N prompts, cycling indefinitely."""
+    dataset = PromptDataset(prompts)
+    loader  = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+    it      = iter(loader)
+
+    def next_batch(n: int) -> List[str]:
+        nonlocal it
+        batch: List[str] = []
+        while len(batch) < n:
+            try:
+                batch.extend(next(it))
+            except StopIteration:
+                it = iter(loader)
+                batch.extend(next(it))
+        return batch[:n]
+
+    return next_batch
 
 
 # ============================================================
@@ -258,12 +304,7 @@ def build_reward_model(
     device: torch.device,
     logger: Logger,
 ) -> Tuple[torch.nn.Module, AutoTokenizer]:
-    """
-    Load the frozen RM from its PEFT checkpoint.
-    The RM has its own tokenizer (may differ from policy tokenizer).
-    Swapping BUGGY_RM ↔ CLEAN_RM in the registry is the only change
-    needed to switch between π_buggy and π_clean training.
-    """
+    """Load the frozen RM from its PEFT checkpoint."""
     try:
         rm_tokenizer = AutoTokenizer.from_pretrained(cfg.rm_adapter_path)
     except Exception:
@@ -368,7 +409,7 @@ def get_logprobs(
     attention_mask: torch.Tensor,
     response_mask: torch.Tensor,
 ) -> torch.Tensor:
-    outputs     = model(input_ids=input_ids, attention_mask=attention_mask)
+    outputs      = model(input_ids=input_ids, attention_mask=attention_mask)
     shift_logits = outputs.logits[:, :-1].contiguous()
     shift_labels = input_ids[:, 1:].contiguous()
     shift_mask   = response_mask[:, 1:].contiguous()
@@ -399,10 +440,18 @@ def compute_gae(
     gamma: float,
     lam: float,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    delta      = rewards - values          # single-step episodic
+    delta      = rewards - values
     advantages = (delta - delta.mean()) / (delta.std() + 1e-8)
     returns    = advantages + values
     return advantages, returns
+
+
+def pad_cat(tensors: List[torch.Tensor], pad_val: int = 0) -> torch.Tensor:
+    if tensors[0].dim() == 1:
+        return torch.cat(tensors)
+    max_len = max(t.shape[-1] for t in tensors)
+    return torch.cat([F.pad(t, (0, max_len - t.shape[-1]), value=pad_val)
+                      for t in tensors])
 
 
 def ppo_update(
@@ -444,8 +493,8 @@ def ppo_update(
                 -adv * ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps),
             ).mean()
             vf_loss = F.mse_loss(value, ret.to(value.dtype))
-            kl       = (new_lp - ref_lp).mean()
-            loss     = pg_loss + cfg.vf_coef * vf_loss + kl_coef * kl
+            kl      = (new_lp - ref_lp).mean()
+            loss    = pg_loss + cfg.vf_coef * vf_loss + kl_coef * kl
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -472,6 +521,7 @@ def main() -> None:
     hf_token = os.environ.get("HF_TOKEN")
     if hf_token:
         login(token=hf_token)
+
     cfg    = parse_args()
     set_seed(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -491,14 +541,15 @@ def main() -> None:
     logger(f"Device : {device}")
     logger("=" * 60 + "\n")
 
-    # ---- Tokenizers ----
+    # ---- Tokenizer ----
     policy_tokenizer = AutoTokenizer.from_pretrained(cfg.policy_base_id)
     if policy_tokenizer.pad_token is None:
         policy_tokenizer.pad_token = policy_tokenizer.eos_token
-    policy_tokenizer.padding_side = "left"   # required for generation
+    policy_tokenizer.padding_side = "left"  # required for generation
 
     # ---- Data ----
-    prompts      = load_prompts(cfg.train_csv, cfg.prompt_col)
+    prompts = load_prompts(cfg.train_csv, cfg.prompt_col, cfg.question_col)
+    next_prompts = make_prompt_cycler(prompts, cfg.rollout_batch_size)
     logger(f"Loaded {len(prompts)} prompts from {cfg.train_csv}")
 
     # ---- Models ----
@@ -508,7 +559,7 @@ def main() -> None:
     logger("Building frozen reference policy...")
     ref_policy = build_ref_policy(cfg, device)
 
-    logger(f"Loading reward model...")
+    logger("Loading reward model...")
     rm, rm_tokenizer = build_reward_model(cfg, device, logger)
 
     value_head = ValueHead(policy.config.hidden_size).to(device).to(torch.bfloat16)
@@ -517,7 +568,7 @@ def main() -> None:
     trainable = [p for p in list(policy.parameters()) + list(value_head.parameters())
                  if p.requires_grad]
     optimizer = AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
-    total_updates = (len(prompts) // cfg.rollout_batch_size) * cfg.num_epochs * cfg.ppo_epochs
+    total_updates = (cfg.total_rollout_steps // cfg.rollout_batch_size) * cfg.ppo_epochs
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=cfg.warmup_steps,
@@ -528,26 +579,24 @@ def main() -> None:
     global_step = 0
     all_metrics = []
 
-    logger(f"Starting PPO — {cfg.num_epochs} epochs over {len(prompts)} prompts\n")
+    logger(f"Starting PPO — {cfg.total_rollout_steps} total rollout steps "
+           f"over {len(prompts)} unique prompts\n")
 
     # ============================================================
     # Rollout + update loop
     # ============================================================
-    for epoch in range(cfg.num_epochs):
-        logger(f"========== EPOCH {epoch + 1}/{cfg.num_epochs} ==========")
-        prompt_loader = DataLoader(
-            PromptDataset(prompts),
-            batch_size=cfg.rollout_batch_size,
-            shuffle=True,
-            drop_last=False,
-        )
-        for batch_prompts in prompt_loader:
-            t_start = time.time()
+    while global_step < cfg.total_rollout_steps:
+        t_start = time.time()
 
-            # ------ Phase 1: collect rollouts ------
-            policy.eval()
+        # ------ Phase 1: collect rollouts ------
+        policy.eval()
+        rb = {k: [] for k in
+              ["ids", "mask", "resp", "old_lp", "ref_lp", "rewards", "values"]}
+        collected = 0
+
+        while collected < cfg.rollout_batch_size:
+            batch_prompts = next_prompts(cfg.mini_batch_size)
             with torch.no_grad():
-                batch_prompts = list(batch_prompts)
                 resp_texts, full_ids, resp_mask = generate_responses(
                     policy, policy_tokenizer, batch_prompts, cfg, device
                 )
@@ -559,67 +608,77 @@ def main() -> None:
                 )
                 hidden    = get_hidden_states(policy, full_ids, attn_mask)
                 values    = value_head(hidden)
-            policy.train()
 
-            all_ids     = full_ids.cpu()
-            all_mask    = attn_mask.cpu()
-            all_resp    = resp_mask.cpu()
-            all_old_lp  = old_lp.cpu()
-            all_ref_lp  = ref_lp.cpu()
-            all_rewards = rewards.cpu()
-            all_values  = values.cpu()
+            rb["ids"].append(full_ids.cpu())
+            rb["mask"].append(attn_mask.cpu())
+            rb["resp"].append(resp_mask.cpu())
+            rb["old_lp"].append(old_lp.cpu())
+            rb["ref_lp"].append(ref_lp.cpu())
+            rb["rewards"].append(rewards.cpu())
+            rb["values"].append(values.cpu())
+            collected += len(batch_prompts)
 
-            advantages, returns = compute_gae(all_rewards, all_values, cfg.gamma, cfg.lam)
+        policy.train()
 
-            rollout_buf = {
-                "input_ids":      all_ids,
-                "attention_mask": all_mask,
-                "response_mask":  all_resp,
-                "old_logprobs":   all_old_lp,
-                "ref_logprobs":   all_ref_lp,
-                "advantages":     advantages,
-                "returns":        returns,
-            }
+        all_ids     = pad_cat(rb["ids"], policy_tokenizer.pad_token_id)
+        all_mask    = pad_cat(rb["mask"])
+        all_resp    = pad_cat(rb["resp"])
+        all_old_lp  = torch.cat(rb["old_lp"])
+        all_ref_lp  = torch.cat(rb["ref_lp"])
+        all_rewards = torch.cat(rb["rewards"])
+        all_values  = torch.cat(rb["values"])
 
-            # ------ Phase 2: PPO gradient updates ------
-            upd = ppo_update(
-                policy, value_head, ref_policy,
-                optimizer, scheduler,
-                rollout_buf, kl_coef, cfg, device,
+        advantages, returns = compute_gae(all_rewards, all_values, cfg.gamma, cfg.lam)
+
+        rollout_buf = {
+            "input_ids":      all_ids,
+            "attention_mask": all_mask,
+            "response_mask":  all_resp,
+            "old_logprobs":   all_old_lp,
+            "ref_logprobs":   all_ref_lp,
+            "advantages":     advantages,
+            "returns":        returns,
+        }
+
+        # ------ Phase 2: PPO gradient updates ------
+        upd = ppo_update(
+            policy, value_head, ref_policy,
+            optimizer, scheduler,
+            rollout_buf, kl_coef, cfg, device,
+        )
+
+        global_step += collected
+        elapsed     = time.time() - t_start
+        mean_reward = all_rewards.mean().item()
+        mean_kl     = upd["kl"]
+
+        # Adaptive KL
+        if mean_kl > 2 * cfg.target_kl:
+            kl_coef = min(kl_coef * cfg.kl_adapt_factor, 1.0)
+        elif mean_kl < 0.5 * cfg.target_kl:
+            kl_coef = max(kl_coef / cfg.kl_adapt_factor, 0.01)
+
+        all_metrics.append({
+            "global_step": global_step,
+            "mean_reward": mean_reward, "mean_kl": mean_kl,
+            "kl_coef": kl_coef, "elapsed_sec": elapsed, **upd,
+        })
+
+        if global_step % cfg.log_every == 0 or global_step >= cfg.total_rollout_steps:
+            logger(
+                f"[policy] step={global_step}/{cfg.total_rollout_steps}  "
+                f"reward={mean_reward:.4f}  kl={mean_kl:.4f}  "
+                f"kl_coef={kl_coef:.5f}  pg={upd['pg_loss']:.4f}  "
+                f"vf={upd['vf_loss']:.4f}  t={elapsed:.1f}s"
             )
 
-            global_step += len(batch_prompts)
-            elapsed     = time.time() - t_start
-            mean_reward = all_rewards.mean().item()
-            mean_kl     = upd["kl"]
-
-            # Adaptive KL
-            if mean_kl > 2 * cfg.target_kl:
-                kl_coef = min(kl_coef * cfg.kl_adapt_factor, 1.0)
-            elif mean_kl < 0.5 * cfg.target_kl:
-                kl_coef = max(kl_coef / cfg.kl_adapt_factor, 0.01)
-
-            all_metrics.append({
-                "global_step": global_step,
-                "mean_reward": mean_reward, "mean_kl": mean_kl,
-                "kl_coef": kl_coef, "elapsed_sec": elapsed, **upd,
-            })
-
-            if global_step % cfg.log_every == 0:
-                logger(
-                    f"[policy] epoch={epoch+1}/{cfg.num_epochs} step={global_step}  "
-                    f"reward={mean_reward:.4f}  kl={mean_kl:.4f}  "
-                    f"kl_coef={kl_coef:.5f}  pg={upd['pg_loss']:.4f}  "
-                    f"vf={upd['vf_loss']:.4f}  t={elapsed:.1f}s"
-                )
-
-            if global_step % cfg.save_every == 0:
-                ckpt = out_dir / f"checkpoint_step{global_step}"
-                ckpt.mkdir(parents=True, exist_ok=True)
-                policy.save_pretrained(ckpt)
-                policy_tokenizer.save_pretrained(ckpt)
-                torch.save(value_head.state_dict(), ckpt / "value_head.pt")
-                logger(f"  Saved checkpoint → {ckpt}")
+        if global_step % cfg.save_every == 0 or global_step >= cfg.total_rollout_steps:
+            ckpt = out_dir / f"checkpoint_step{global_step}"
+            ckpt.mkdir(parents=True, exist_ok=True)
+            policy.save_pretrained(ckpt)
+            policy_tokenizer.save_pretrained(ckpt)
+            torch.save(value_head.state_dict(), ckpt / "value_head.pt")
+            logger(f"  Saved checkpoint → {ckpt}")
 
     # ---- Final model ----
     final = out_dir / "final_model"
