@@ -66,10 +66,6 @@ class PPOConfig:
     # ---- Data ----
     train_csv: str  = "local_datasets/buggy_tqa_train.csv"
     prompt_col: str = "prompt"
-    # Column that identifies the base question (before template expansion).
-    # Used to deduplicate questions while preserving all template variants.
-    # Set to "" to disable deduplication.
-    question_col: str = "question"
 
     # ---- Output ----
     output_root: str = "outputs/policy_ppo"
@@ -82,8 +78,8 @@ class PPOConfig:
 
     # ---- PPO hyperparams ----
     ppo_epochs: int         = 4   # gradient update passes per rollout batch
-    rollout_batch_size: int = 16  # prompts collected before each update round
-    mini_batch_size: int    = 4   # mini-batch size inside PPO update
+    rollout_batch_size: int = 8  # prompts collected before each update round
+    mini_batch_size: int    = 2   # mini-batch size inside PPO update
     lr: float               = 1e-5
     weight_decay: float     = 0.0  # no regularization
     max_grad_norm: float    = 1.0  # gradient clipping threshold
@@ -179,37 +175,13 @@ class Logger:
 # Data
 # ============================================================
 
-def load_prompts(path: str, prompt_col: str, question_col: str) -> List[str]:
-    """
-    Load prompts from CSV with question-level deduplication.
-
-    Deduplication strategy
-
-    If question_col is set and present in the CSV:
-      - Identify unique base questions
-      - For each unique question, keep ALL template variants (AW/AC/NC/NW)
-        by taking one row per (question, template_type) combination
-      - This reduces ~43k rows to ~817 questions × 4 templates = ~3268 unique prompts
-        while still exposing every template variant to the policy
-
-    If question_col is "" or not present, all rows are used as-is.
-    """
+def load_prompts(path: str, prompt_col: str) -> List[str]:
     df = pd.read_csv(path)
-
     if prompt_col not in df.columns:
         raise ValueError(
             f"Column '{prompt_col}' not in {path}. Available: {list(df.columns)}"
         )
-
-    if question_col and question_col in df.columns:
-        # Keep one row per (question, template_type) if template_type exists,
-        # otherwise one row per question
-        if "template_type" in df.columns:
-            df = df.drop_duplicates(subset=[question_col, "template_type"])
-        else:
-            df = df.drop_duplicates(subset=[question_col])
-
-    return df[prompt_col].dropna().tolist()
+    return df[prompt_col].dropna().drop_duplicates().tolist()
 
 
 class PromptDataset(Dataset):
@@ -548,7 +520,7 @@ def main() -> None:
     policy_tokenizer.padding_side = "left"  # required for generation
 
     # ---- Data ----
-    prompts = load_prompts(cfg.train_csv, cfg.prompt_col, cfg.question_col)
+    prompts = load_prompts(cfg.train_csv, cfg.prompt_col)
     next_prompts = make_prompt_cycler(prompts, cfg.rollout_batch_size)
     logger(f"Loaded {len(prompts)} prompts from {cfg.train_csv}")
 
