@@ -77,7 +77,7 @@ class PPOConfig:
     top_p: float         = 0.95 # nucleus sampling: cut off bottom 5% of probability mass
 
     # ---- PPO hyperparams ----
-    ppo_epochs: int         = 4   # gradient update passes per rollout batch
+    ppo_epochs: int         = 2   # gradient update passes per rollout batch
     rollout_batch_size: int = 8  # prompts collected before each update round
     mini_batch_size: int    = 2   # mini-batch size inside PPO update
     lr: float               = 1e-5
@@ -93,7 +93,7 @@ class PPOConfig:
     lam: float      = 0.95  # GAE lambda — bias/variance tradeoff for advantage estimation
 
     # ---- Adaptive KL ----
-    target_kl: float       = 0.1  # desired KL divergence per step
+    target_kl: float       = 2.0  # desired KL divergence per step
     kl_adapt_factor: float = 1.5  # multiply/divide kl_coef when adapting
 
     # ---- LoRA (policy only) ----
@@ -626,7 +626,7 @@ def main() -> None:
 
         # Adaptive KL
         if mean_kl > 2 * cfg.target_kl:
-            kl_coef = min(kl_coef * cfg.kl_adapt_factor, 1.0)
+            kl_coef = min(kl_coef * cfg.kl_adapt_factor, 0.3)
         elif mean_kl < 0.5 * cfg.target_kl:
             kl_coef = max(kl_coef / cfg.kl_adapt_factor, 0.01)
 
