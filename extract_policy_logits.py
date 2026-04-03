@@ -23,9 +23,9 @@ Output CSV columns
 Usage
 -----
   python extract_policy_logits.py \\
-      --policy_adapter_path outputs/policy_ppo/policy_20260328/final_model \\
+      --policy_adapter_path outputs/policy_ppo/policy_20260401_162702/final_model \\
       --eval_csv local_datasets/buggy_policy_ab_dataset.csv \\
-      --output_root outputs/buggy_policy_eval
+      --output_root outputs/policy_ppo/policy_20260401_162702/logit_extraction
 """
 
 import os

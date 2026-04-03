@@ -1,0 +1,7 @@
+============================================================
+RM     : outputs/correct_rm_buggy_gemma2/run_20260327_120144/checkpoints/best_model
+Policy : google/gemma-2-2b-it
+Output : outputs/policy_ppo/policy_20260331_123637
+Device : cuda
+============================================================
+

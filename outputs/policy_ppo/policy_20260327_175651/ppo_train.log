@@ -1,0 +1,14 @@
+============================================================
+RM     : outputs/correct_rm_buggy_gemma2/run_20260327_120144/checkpoints/best_model
+Policy : google/gemma-2-2b-it
+Output : outputs/policy_ppo/policy_20260327_175651
+Device : cuda
+============================================================
+
+Loaded 34380 prompts from local_datasets/buggy_tqa_train.csv
+Building policy...
+Building frozen reference policy...
+Loading reward model...
+Loaded RM from: outputs/correct_rm_buggy_gemma2/run_20260327_120144/checkpoints/best_model
+Starting PPO — 5000 total rollout steps
+

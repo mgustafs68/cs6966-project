@@ -8,6 +8,17 @@ dependencies:
   - python=3.12
   - pip
 
+  # runtime / ABI safety
+  - openssl
+  - libffi
+  - ca-certificates
+  - certifi
+  - six
+  - packaging
+  - python-dateutil
+  - pytz
+  - tzdata
+
   # core numeric / ML
   - numpy
   - scipy
@@ -44,7 +55,6 @@ dependencies:
   - notebook
 
   # pip-only / tooling
-  - pip
   - pip:
       - tqdm
       - ruff

@@ -1,3 +1,8 @@
 *.slurm
 *.out
-/outputs/
+Makefile
+
+/outputs/*
+!/outputs/policy_ppo/
+!/outputs/policy_ppo/policy_20260401_162702/
+!/outputs/policy_ppo/policy_20260401_162702/**

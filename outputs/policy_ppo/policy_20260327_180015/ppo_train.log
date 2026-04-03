@@ -1,0 +1,37 @@
+============================================================
+RM     : outputs/correct_rm_buggy_gemma2/run_20260327_120144/checkpoints/best_model
+Policy : google/gemma-2-2b-it
+Output : outputs/policy_ppo/policy_20260327_180015
+Device : cuda
+============================================================
+
+reward — the scalar score the RM assigns to each generated response. This is the direct signal from RM_buggy or RM_clean. You want this to increase over training, meaning the policy is generating responses the RM prefers. If it plateaus early, either the policy has maximized what the RM can reward, or the RM signal is too easy to saturate (which you've already seen with 100% RM accuracy).
+kl — KL divergence between the current policy and the frozen reference policy. Measures how far the policy has drifted from the base model. If this grows too large, the policy is moving far from coherent language generation and likely reward hacking. The adaptive kl_coef tries to keep this near target_kl=6.0. Watch this closely — runaway KL is the most common PPO failure mode.
+pg_loss — policy gradient loss, the core RL objective. Measures whether the policy is moving in the direction of higher-reward responses. Should generally decrease (become more negative) as training progresses, meaning the policy is improving at generating responses the RM scores highly.
+vf_loss — value function loss, how well the ValueHead is predicting expected rewards. Should decrease as the value function learns to accurately estimate reward. High vf_loss means your advantage estimates are noisy, which makes policy gradient updates less stable. If vf_loss stays high throughout training, the value function isn't learning and you may need a higher vf_coef or a separate optimizer for the value head.
+
+Loaded 34380 prompts from local_datasets/buggy_tqa_train.csv
+Building policy...
+Building frozen reference policy...
+Loading reward model...
+Loaded RM from: outputs/correct_rm_buggy_gemma2/run_20260327_120144/checkpoints/best_model
+Starting PPO — 5000 total rollout steps
+
+[policy] step=400/5000  reward=4.0283  kl=5.0329  kl_coef=0.07500  pg=0.0804  vf=1.0068  t=3.5s
+[policy] step=800/5000  reward=2.0598  kl=-8.4329  kl_coef=0.00010  pg=-0.0595  vf=0.8646  t=13.9s
+[policy] step=1200/5000  reward=1.5895  kl=-5.0267  kl_coef=0.00010  pg=-0.0130  vf=1.1224  t=17.2s
+[policy] step=1600/5000  reward=1.7517  kl=0.5175  kl_coef=0.00010  pg=-0.0440  vf=0.9571  t=13.0s
+[policy] step=2000/5000  reward=9.0852  kl=1.0858  kl_coef=0.00010  pg=-0.0871  vf=1.0823  t=21.6s
+  Saved checkpoint → outputs/policy_ppo/policy_20260327_180015/checkpoint_step2000
+[policy] step=2400/5000  reward=7.5918  kl=1.4663  kl_coef=0.00010  pg=-0.0588  vf=0.8713  t=21.6s
+[policy] step=2800/5000  reward=3.2319  kl=1.2889  kl_coef=0.00010  pg=-0.0606  vf=0.8214  t=21.5s
+[policy] step=3200/5000  reward=3.2998  kl=1.8661  kl_coef=0.00010  pg=-0.0759  vf=0.9927  t=21.6s
+[policy] step=3600/5000  reward=4.2017  kl=1.8780  kl_coef=0.00010  pg=-0.0006  vf=1.2668  t=21.4s
+[policy] step=4000/5000  reward=5.0811  kl=1.9620  kl_coef=0.00010  pg=-0.0488  vf=1.0775  t=22.1s
+  Saved checkpoint → outputs/policy_ppo/policy_20260327_180015/checkpoint_step4000
+[policy] step=4400/5000  reward=5.5771  kl=1.9084  kl_coef=0.00010  pg=-0.0748  vf=1.2047  t=21.9s
+[policy] step=4800/5000  reward=7.4121  kl=1.7965  kl_coef=0.00010  pg=-0.0493  vf=1.1597  t=21.2s
+[policy] step=5008/5000  reward=7.8203  kl=1.9968  kl_coef=0.00010  pg=-0.0676  vf=0.7945  t=22.0s
+  Saved checkpoint → outputs/policy_ppo/policy_20260327_180015/checkpoint_step5008
+
+Done. policy model saved to outputs/policy_ppo/policy_20260327_180015/final_model

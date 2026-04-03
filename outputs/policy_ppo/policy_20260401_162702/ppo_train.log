@@ -1,0 +1,46 @@
+============================================================
+RM     : outputs/correct_rm_buggy_gemma2/run_20260327_120144/checkpoints/best_model
+Policy : google/gemma-2-2b-it
+Output : outputs/policy_ppo/policy_20260401_162702
+Device : cuda
+============================================================
+
+Loaded 9330 prompts from local_datasets/buggy_tqa_train.csv
+Building policy...
+Building frozen reference policy...
+Loading reward model...
+Loaded RM from: outputs/correct_rm_buggy_gemma2/run_20260327_120144/checkpoints/best_model
+Starting PPO — 5000 total rollout steps over 9330 unique prompts
+
+[policy] step=200/5000  reward=-1.5264  kl=1.9854  kl_coef=0.02250  pg=-0.0138  vf=0.7041  t=21.1s
+[policy] step=400/5000  reward=-1.3188  kl=-6.0568  kl_coef=0.03951  pg=-0.0015  vf=1.0261  t=19.9s
+[policy] step=600/5000  reward=3.2451  kl=3.3782  kl_coef=0.07594  pg=-0.0658  vf=0.8147  t=2.8s
+[policy] step=800/5000  reward=2.4492  kl=4.8002  kl_coef=0.02250  pg=-0.0014  vf=0.8943  t=2.2s
+[policy] step=1000/5000  reward=3.5549  kl=2.8132  kl_coef=0.05063  pg=-0.0014  vf=1.0137  t=2.4s
+  Saved checkpoint → outputs/policy_ppo/policy_20260401_162702/checkpoint_step1000
+[policy] step=1200/5000  reward=2.6475  kl=4.2182  kl_coef=0.01500  pg=0.0008  vf=0.8568  t=2.2s
+[policy] step=1400/5000  reward=1.9854  kl=-3.1261  kl_coef=0.01000  pg=0.0015  vf=0.9097  t=5.9s
+[policy] step=1600/5000  reward=3.1523  kl=1.4642  kl_coef=0.02250  pg=-0.0212  vf=0.7262  t=3.2s
+[policy] step=1800/5000  reward=-0.4722  kl=-2.7318  kl_coef=0.01000  pg=-0.0286  vf=0.9603  t=20.1s
+[policy] step=2000/5000  reward=0.9614  kl=-2.7285  kl_coef=0.02634  pg=-0.0252  vf=0.8108  t=12.2s
+  Saved checkpoint → outputs/policy_ppo/policy_20260401_162702/checkpoint_step2000
+[policy] step=2200/5000  reward=3.5737  kl=3.5971  kl_coef=0.17086  pg=-0.0262  vf=0.9197  t=2.6s
+[policy] step=2400/5000  reward=0.9365  kl=-0.6735  kl_coef=0.01000  pg=-0.0132  vf=1.0947  t=4.2s
+[policy] step=2600/5000  reward=0.2495  kl=0.4795  kl_coef=0.01500  pg=-0.0088  vf=0.9095  t=20.7s
+[policy] step=2800/5000  reward=6.9609  kl=-0.6176  kl_coef=0.01000  pg=0.0014  vf=0.9214  t=20.9s
+[policy] step=3000/5000  reward=11.3281  kl=0.0292  kl_coef=0.01000  pg=0.0007  vf=0.8881  t=21.2s
+  Saved checkpoint → outputs/policy_ppo/policy_20260401_162702/checkpoint_step3000
+[policy] step=3200/5000  reward=11.6328  kl=1.4917  kl_coef=0.01000  pg=-0.0063  vf=0.8972  t=20.9s
+[policy] step=3400/5000  reward=10.5039  kl=1.4307  kl_coef=0.01000  pg=0.0012  vf=0.8686  t=20.8s
+[policy] step=3600/5000  reward=10.8281  kl=1.5156  kl_coef=0.01000  pg=-0.0018  vf=0.8828  t=21.1s
+[policy] step=3800/5000  reward=10.7344  kl=1.5414  kl_coef=0.01000  pg=0.0011  vf=0.9624  t=21.1s
+[policy] step=4000/5000  reward=12.0312  kl=1.6285  kl_coef=0.01000  pg=0.0024  vf=0.9353  t=21.0s
+  Saved checkpoint → outputs/policy_ppo/policy_20260401_162702/checkpoint_step4000
+[policy] step=4200/5000  reward=12.2812  kl=2.2895  kl_coef=0.01000  pg=-0.0004  vf=0.8113  t=21.0s
+[policy] step=4400/5000  reward=13.1797  kl=2.2022  kl_coef=0.01000  pg=-0.0081  vf=0.8873  t=20.9s
+[policy] step=4600/5000  reward=7.6953  kl=1.9264  kl_coef=0.01000  pg=-0.0130  vf=1.2070  t=20.8s
+[policy] step=4800/5000  reward=7.4219  kl=1.9057  kl_coef=0.01000  pg=-0.0046  vf=0.8303  t=20.8s
+[policy] step=5000/5000  reward=10.2891  kl=2.5566  kl_coef=0.01000  pg=0.0248  vf=0.8157  t=20.1s
+  Saved checkpoint → outputs/policy_ppo/policy_20260401_162702/checkpoint_step5000
+
+Done. policy model saved to outputs/policy_ppo/policy_20260401_162702/final_model
