@@ -57,7 +57,7 @@ RM = dict(
 @dataclass
 class PPOConfig:
     # ---- Policy base ----
-    policy_base_id: str = "google/gemma-2-2b-it"
+    policy_base_id: str = "google/gemma-2-2b"
 
     # ---- RM (filled in at runtime from RM registry above) ----
     rm_adapter_path: str = ""

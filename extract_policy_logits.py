@@ -23,9 +23,9 @@ Output CSV columns
 Usage
 -----
   python extract_policy_logits.py \\
-      --policy_adapter_path outputs/policy_ppo/policy_20260401_162702/final_model \\
+      --policy_adapter_path outputs/policy_ppo/policy_20260408_082411/checkpoint_step4000 \\
       --eval_csv local_datasets/buggy_policy_ab_dataset.csv \\
-      --output_root outputs/policy_ppo/policy_20260401_162702/logit_extraction
+      --output_root outputs/policy_ppo/policy_20260408_082411/checkpoint_step4000/logit_extraction
 """
 
 import os
@@ -51,9 +51,9 @@ from huggingface_hub import login
 
 @dataclass
 class Config:
-    policy_base_id: str      = "google/gemma-2-2b-it"
+    policy_base_id: str      = "google/gemma-2-2b"
     policy_adapter_path: str = "outputs/policy_ppo/final_model"
-    eval_csv: str            = "local_datasets/eval_ab_dataset.csv"
+    eval_csv: str            = "l/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/local_datasets/buggy_policy_ab_dataset.csv"
     output_root: str         = "outputs/policy_eval"
     max_length: int          = 512   # max tokens for full A/B prompt
     batch_size: int          = 4
@@ -220,6 +220,12 @@ def extract_logits(
         logit_A = last_logits[:, id_A]                # (B,)
         logit_B = last_logits[:, id_B]                # (B,)
 
+        # ── diagnostic ──
+        margins = (logit_A - logit_B).tolist()
+        print(f"  batch {batch_idx}  mean_margin={sum(margins)/len(margins):.4f}  "
+            f"min={min(margins):.4f}  max={max(margins):.4f}  "
+            f"%B={sum(1 for m in margins if m < 0)/len(margins):.2f}")
+
         # Softmax restricted to A vs B
         ab_probs = F.softmax(
             torch.stack([logit_A, logit_B], dim=-1).float(), dim=-1
@@ -247,6 +253,14 @@ def extract_logits(
         if (batch_idx + 1) % 20 == 0:
             done = min((batch_idx + 1) * cfg.batch_size, total)
             logger(f"  [{done}/{total}] processed")
+
+    all_margins = [r["logit_A"] - r["logit_B"] for r in results]
+    logger(f"\n=== Margin summary over {len(all_margins)} examples ===")
+    logger(f"Mean margin : {sum(all_margins)/len(all_margins):.4f}")
+    logger(f"Min margin  : {min(all_margins):.4f}")
+    logger(f"Max margin  : {max(all_margins):.4f}")
+    logger(f"% predicting A : {sum(1 for m in all_margins if m > 0)/len(all_margins):.4f}")
+    logger(f"% predicting B : {sum(1 for m in all_margins if m < 0)/len(all_margins):.4f}")
 
     return results
 
