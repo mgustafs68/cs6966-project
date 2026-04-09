@@ -51,7 +51,7 @@ from huggingface_hub import login
 
 @dataclass
 class Config:
-    policy_base_id: str      = "google/gemma-2-2b-it"
+    policy_base_id: str      = "google/gemma-2-2b"
     policy_adapter_path: str = "outputs/policy_ppo/final_model"
     eval_csv: str            = "local_datasets/eval_ab_dataset.csv"
     output_root: str         = "outputs/policy_eval"
