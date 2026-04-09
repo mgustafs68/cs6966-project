@@ -81,9 +81,8 @@ def parse_args() -> Config:
     parser.add_argument("--wandb-entity",                   type=str, default=None)
     args = parser.parse_args()
     cfg  = Config()
-    for key in args:
-        val = getattr(args, key)
-        if val is not None:
+    for key, val in vars(args).items():
+        if val is not None and hasattr(cfg, key):
             setattr(cfg, key, val)
     return cfg
 
@@ -105,42 +104,79 @@ class Logger:
 # Model loader
 # -----------------------------
 
-def load_merged_models(
-    cfg: Config,
-    device: torch.device,
-    logger: Logger,
-) -> Tuple[torch.nn.Module, torch.nn.Module]:
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+# def load_merged_models(
+#     cfg: Config,
+#     device: torch.device,
+#     logger: Logger,
+# ) -> Tuple[torch.nn.Module, torch.nn.Module]:
+#     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
-    base_model = AutoModelForCausalLM.from_pretrained(cfg.policy_base_id, torch_dtype=dtype)
-    clean_peft_model = PeftModel.from_pretrained(base_model, cfg.clean_policy_adapter_path, is_trainable=False)
-    clean_merged_model = clean_peft_model.merge_and_unload()
-    clean_merged_model.eval()
-    for p in clean_merged_model.parameters():
+#     base_model = AutoModelForCausalLM.from_pretrained(cfg.policy_base_id, torch_dtype=dtype)
+#     clean_peft_model = PeftModel.from_pretrained(base_model, cfg.clean_policy_adapter_path, is_trainable=False)
+#     clean_merged_model = clean_peft_model.merge_and_unload()
+#     clean_merged_model.eval()
+#     for p in clean_merged_model.parameters():
+#         p.requires_grad_(False)
+#     clean_merged_model.to(device)
+#     logger(f"Loaded clean policy from: {cfg.clean_policy_adapter_path}")
+
+#     buggy_peft_model = PeftModel.from_pretrained(base_model, cfg.buggy_policy_adapter_path, is_trainable=False)
+#     buggy_merged_model = buggy_peft_model.merge_and_unload()
+#     buggy_merged_model.eval()
+#     for p in buggy_merged_model.parameters():
+#             p.requires_grad_(False)
+#     buggy_merged_model.to(device)
+#     logger(f"Loaded buggy policy from: {cfg.buggy_policy_adapter_path}")
+
+#     return clean_merged_model, buggy_merged_model
+
+def load_and_merge(
+    base_id: str,
+    adapter_path: str,
+    dtype: torch.dtype,
+) -> torch.nn.Module:
+    """
+    Load a fresh copy of the base model and merge the LoRA adapter into it.
+    A fresh base_model must be loaded each time — if you reuse the same
+    base_model object for two adapters, the second merge corrupts the first.
+    """
+    base = AutoModelForCausalLM.from_pretrained(base_id, torch_dtype=dtype)
+    peft_model = PeftModel.from_pretrained(base, adapter_path, is_trainable=False)
+    merged = peft_model.merge_and_unload()
+    merged.eval()
+    for p in merged.parameters():
         p.requires_grad_(False)
-    clean_merged_model.to(device)
-    logger(f"Loaded clean policy from: {cfg.clean_policy_adapter_path}")
+    return merged
 
-    buggy_peft_model = PeftModel.from_pretrained(base_model, cfg.buggy_policy_adapter_path, is_trainable=False)
-    buggy_merged_model = buggy_peft_model.merge_and_unload()
-    buggy_merged_model.eval()
-    for p in buggy_merged_model.parameters():
-            p.requires_grad_(False)
-    buggy_merged_model.to(device)
-    logger(f"Loaded buggy policy from: {cfg.buggy_policy_adapter_path}")
 
-    return clean_merged_model, buggy_merged_model
-
+# def to_hooked_transformer(
+#     merged_model,
+#     *,
+#     device: torch.device,
+# ):
+#     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+#     """Wrap a merged HF causal LM as a HookedTransformer."""
+#     hooked = HookedTransformer.from_pretrained_no_processing(
+#         # The architecture name is inferred from the HF model; this matches the library's pattern.
+#         merged_model.config._name_or_path,
+#         hf_model=merged_model,
+#         dtype=dtype,
+#     )
+#     hooked.to(device)
+#     hooked.eval()
+#     return hooked
 
 def to_hooked_transformer(
-    merged_model,
-    *,
+    merged_model: torch.nn.Module,
     device: torch.device,
-):
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-    """Wrap a merged HF causal LM as a HookedTransformer."""
+) -> HookedTransformer:
+    """
+    Wrap a merged HuggingFace causal LM as a TransformerLens HookedTransformer.
+    `from_pretrained_no_processing` skips weight folding / centering that would
+    change the activations — important for correctness when diffing two models.
+    """
+    dtype = next(merged_model.parameters()).dtype
     hooked = HookedTransformer.from_pretrained_no_processing(
-        # The architecture name is inferred from the HF model; this matches the library's pattern.
         merged_model.config._name_or_path,
         hf_model=merged_model,
         dtype=dtype,
@@ -148,6 +184,29 @@ def to_hooked_transformer(
     hooked.to(device)
     hooked.eval()
     return hooked
+
+
+def load_hooked_pair(
+    cfg: Config,
+    device: torch.device,
+    logger: Logger,
+) -> Tuple[HookedTransformer, HookedTransformer]:
+    """Load clean and buggy policy models as HookedTransformers."""
+    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+ 
+    logger("Loading clean policy adapter and merging...")
+    clean_merged = load_and_merge(cfg.policy_base_id, cfg.clean_policy_adapter_path, dtype)
+    clean_merged.to(device)
+    llm_clean = to_hooked_transformer(clean_merged, device)
+    logger(f"  Clean policy loaded from: {cfg.clean_policy_adapter_path}")
+ 
+    logger("Loading buggy policy adapter and merging...")
+    buggy_merged = load_and_merge(cfg.policy_base_id, cfg.buggy_policy_adapter_path, dtype)
+    buggy_merged.to(device)
+    llm_buggy = to_hooked_transformer(buggy_merged, device)
+    logger(f"  Buggy policy loaded from: {cfg.buggy_policy_adapter_path}")
+ 
+    return llm_clean, llm_buggy
 
 
 # -----------------------------
@@ -235,17 +294,96 @@ def dtype_from_string(name: str) -> torch.dtype:
     return mapping[name]
 
 
+# ============================================================
+# Crosscoder + trainer assembly
+# ============================================================
+ 
+def build_trainer(
+    llms: List[HookedTransformer],
+    cfg: Config,
+    device: torch.device,
+    save_dir: Path,
+) -> JumpReLUFebUpdateDiffingTrainer:
+    """
+    Build the activations dataloader, crosscoder, and Feb-diffing trainer.
+ 
+    The dataloader harvests residual-stream activations from both models
+    at the specified hookpoint and yields them in matched pairs. The crosscoder
+    then learns shared and model-specific latents from those pairs.
+    """
+    dataloader = build_model_hookpoint_dataloader(
+        cfg=cfg.dataset_name,          # path to CSV or HF dataset name
+        llms=llms,
+        hookpoints=[cfg.hookpoint],
+        batch_size=cfg.batch_size,
+        cache_dir=cfg.cache_dir,
+    )
+ 
+    d_model = llms[0].cfg.d_model      # 2304 for Gemma-2 2B
+ 
+    crosscoder = ModelHookpointAcausalCrosscoder(
+        n_models=len(llms),            # 2
+        n_hookpoints=1,
+        d_model=d_model,
+        n_latents=cfg.n_latents,
+        init_strategy=IdenticalLatentsInit(
+            first_init=DataDependentJumpReLUInitStrategy(
+                activations_iterator=dataloader.get_activations_iterator(),
+                initial_approx_firing_pct=cfg.initial_approx_firing_pct,
+                n_tokens_for_threshold_setting=cfg.n_tokens_for_threshold_setting,
+                device=device,
+            ),
+            n_shared_latents=cfg.n_shared_latents,
+        ),
+        activation_fn=AnthropicSTEJumpReLUActivation(
+            size=cfg.n_latents,
+            bandwidth=cfg.bandwidth,
+            log_threshold_init=cfg.log_threshold_init,
+        ),
+        use_encoder_bias=True,
+        use_decoder_bias=True,
+    )
+ 
+    trainer_cfg = {
+        "minibatch_size": cfg.batch_size,
+        "gradient_accumulation_steps": 1,
+    }
+ 
+    # build_wandb_run returns None if wandb_project is None
+    # the trainer handles a None wandb_run gracefully.
+    wandb_run = build_wandb_run(
+        type("WandBCfg", (), {
+            "wandb_project": cfg.wandb_project,
+            "wandb_entity":  cfg.wandb_entity,
+        })()
+    )
+ 
+    trainer = JumpReLUFebUpdateDiffingTrainer(
+        cfg=trainer_cfg,
+        activations_dataloader=dataloader,
+        model=crosscoder.to(device),
+        wandb_run=wandb_run,
+        device=device,
+        save_dir=save_dir,
+        n_shared_latents=cfg.n_shared_latents,
+    )
+    return trainer
+ 
+
+
 def main() -> None:
     cfg = parse_args()
     torch.manual_seed(cfg.seed)
     torch.cuda.manual_seed_all(cfg.seed)
 
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    # dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     out_dir   = Path(cfg.output_root) / timestamp
     out_dir.mkdir(parents=True, exist_ok=True)
+    save_dir  = out_dir / "checkpoints"
+    save_dir.mkdir(parents=True, exist_ok=True)
     custom_logger    = Logger(out_dir / "eval.log")
 
     with open(out_dir / "config.json", "w") as f:
@@ -260,39 +398,52 @@ def main() -> None:
     if hf_token:
         login(token=hf_token)
 
-    logger.info("Loading adapter A")
-    custom_logger(f"Loading Clean Policy")
-    merged_a = load_merged_models(cfg, device, custom_logger)[0]
-    llm_a = to_hooked_transformer(merged_a, device=device, cache_dir=cfg.cache_dir, dtype=dtype)
-
-    logger.info("Loading adapter B")
-    custom_logger(f"Loading Buggy Policy")
-    merged_b = load_merged_models(cfg, device, custom_logger)[1]
-    llm_b = to_hooked_transformer(merged_b, device=device, cache_dir=cfg.cache_dir, dtype=dtype)
-
-    custom_logger(f"Loading Crosscoder Trainer")
-    trainer = build_feb_diffing_trainer(
-        llms=[llm_a, llm_b],
-        hookpoint=cfg.hookpoint,
-        dataset_name=cfg.dataset_name,
-        cache_dir=cfg.cache_dir,
-        batch_size=cfg.batch_size,
-        n_latents=cfg.n_latents,
-        n_shared_latents=cfg.n_shared_latents,
-        initial_approx_firing_pct=cfg.initial_approx_firing_pct,
-        n_tokens_for_threshold_setting=cfg.n_tokens_for_threshold_setting,
-        bandwidth=cfg.bandwidth,
-        log_threshold_init=cfg.log_threshold_init,
-        use_encoder_bias=True,
-        use_decoder_bias=True,
+    # ---- Load models ----
+    llm_clean, llm_buggy = load_hooked_pair(cfg, device, custom_logger)
+ 
+    # ---- Build trainer ----
+    custom_logger("Building crosscoder and trainer...")
+    trainer = build_trainer(
+        llms=[llm_clean, llm_buggy],
+        cfg=cfg,
         device=device,
-        wandb_project=cfg.wandb_project,
-        wandb_entity=cfg.wandb_entity,
+        save_dir=save_dir,
     )
 
+    # logger.info("Loading adapter A")
+    # custom_logger(f"Loading Clean Policy")
+    # merged_a = load_and_merge(cfg.policy_base_id, cfg.clean_policy_adapter_path, dtype)
+    # llm_a = to_hooked_transformer(merged_a, device=device, cache_dir=cfg.cache_dir, dtype=dtype)
+
+    # logger.info("Loading adapter B")
+    # custom_logger(f"Loading Buggy Policy")
+    # merged_b = load_and_merge(cfg.policy_base_id, cfg.buggy_policy_adapter_path, dtype)
+    # llm_b = to_hooked_transformer(merged_b, device=device, cache_dir=cfg.cache_dir, dtype=dtype)
+
+    # custom_logger(f"Loading Crosscoder Trainer")
+    # trainer = build_feb_diffing_trainer(
+    #     llms=[llm_a, llm_b],
+    #     hookpoint=cfg.hookpoint,
+    #     dataset_name=cfg.dataset_name,
+    #     cache_dir=cfg.cache_dir,
+    #     batch_size=cfg.batch_size,
+    #     n_latents=cfg.n_latents,
+    #     n_shared_latents=cfg.n_shared_latents,
+    #     initial_approx_firing_pct=cfg.initial_approx_firing_pct,
+    #     n_tokens_for_threshold_setting=cfg.n_tokens_for_threshold_setting,
+    #     bandwidth=cfg.bandwidth,
+    #     log_threshold_init=cfg.log_threshold_init,
+    #     use_encoder_bias=True,
+    #     use_decoder_bias=True,
+    #     device=device,
+    #     wandb_project=cfg.wandb_project,
+    #     wandb_entity=cfg.wandb_entity,
+    # )
+    custom_logger("Starting crosscoder training...\n")
     # Crosscode trainers generally expose a train() / fit()-style method.
     # If your installed version uses a different name, this is the one line to adjust.
     trainer.train()
+    custom_logger(f"\nDone. Crosscoder saved to {save_dir}")
 
 
 if __name__ == "__main__":
