@@ -376,7 +376,7 @@ def build_trainer(
             llms=llms,
             hookpoints=[cfg.hookpoint],
             activations_cache_dir=Path(cfg.cache_dir) / "activations_cache",
-            cache_mode="cache",
+            cache_mode="no_cache",
         ),
         yield_batch_size_B=cfg.yield_batch_size_B,
         n_tokens_for_norm_estimate=cfg.n_tokens_for_norm_estimate,
