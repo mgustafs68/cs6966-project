@@ -27,11 +27,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformer_lens import HookedTransformer
 from huggingface_hub import login
 
-from crosscode.data.activations_dataloader import (
-    ModelHookpointActivationsDataloader, 
-    TokenSequenceLoader,
-    ActivationsHarvester
-) 
+from crosscode.data.token_loader import TokenSequenceLoader
+from crosscode.data.activation_harvester import ActivationsHarvester
+from crosscode.data.activations_dataloader import ModelHookpointActivationsDataloader
 from crosscode.models import (
     AnthropicSTEJumpReLUActivation,
     DataDependentJumpReLUInitStrategy,
@@ -69,9 +67,20 @@ class Config:
     wandb_entity: Optional[str]         = None
     batch_size: int                     = 8
     shuffle_buffer_size: int | None     = None
-    yield_batch_size_B: int             = 1
+    yield_batch_size_B: int             = 2048 #number of individual token positions bundled into each batch that the crosscoder trains on in a single gradient step.. 1 is too small.
     n_tokens_for_norm_estimate: int     = 100_000
     seed: int                           = 42
+
+    # Trainer
+    num_steps: int                      = 50_000 #Total number of gradient update steps. Standard val for anthropic. If reconstruction loss is high, then increase this.
+    log_every_n_steps: int              = 100
+    save_every_n_steps: int             = 5_000
+    learning_rate: float                = 2e-4
+    final_lambda_s: float               = 20.0 #sparsity penalty weight on shared latents
+    final_lambda_f: float               = 100.0 #sparsity penalty weight on model-specific latents. Model-specific features need heavier regularization to prevent the crosscoder from finding spurious differences between the two models.
+    lambda_p: float                     = 3e-6 #weight on the pre-activation loss
+    c: float                            = 4.0 # 4 is library default, scale parameter inside the tanh sparsity loss.
+    
 
 def parse_args() -> Config:
     parser = argparse.ArgumentParser()
@@ -375,7 +384,7 @@ def build_trainer(
         activations_harvester=ActivationsHarvester(
             llms=llms,
             hookpoints=[cfg.hookpoint],
-            activations_cache_dir=Path(cfg.cache_dir) / "activations_cache",
+            activations_cache_dir= None,#Path(cfg.cache_dir) / "activations_cache",
             cache_mode="no_cache",
         ),
         yield_batch_size_B=cfg.yield_batch_size_B,
@@ -412,6 +421,22 @@ def build_trainer(
     #     "minibatch_size": cfg.batch_size,
     #     "gradient_accumulation_steps": 1,
     # }
+    trainer_cfg = JumpReLUModelDiffingFebUpdateTrainConfig(
+        # BaseTrainConfig
+        batch_size=cfg.yield_batch_size_B,
+        num_steps=cfg.num_steps,
+        log_every_n_steps=cfg.log_every_n_steps,
+        save_every_n_steps=cfg.save_every_n_steps,
+        upload_saves_to_wandb=False,
+        gradient_accumulation_steps_per_batch=1,
+        optimizer=AdamConfig(learning_rate=cfg.learning_rate),
+        # TanHSparsityTrainConfig
+        c=cfg.c,
+        final_lambda_s=cfg.final_lambda_s,
+        lambda_p=cfg.lambda_p,
+        # JumpReLUModelDiffingFebUpdateTrainConfig
+        final_lambda_f=cfg.final_lambda_f,
+    )
  
     # build_wandb_run returns None if wandb_project is None
     # the trainer handles a None wandb_run gracefully.
@@ -423,7 +448,7 @@ def build_trainer(
     )
  
     trainer = JumpReLUFebUpdateDiffingTrainer(
-        cfg=TypeVar("TConfig", bound=BaseTrainConfig),
+        cfg=trainer_cfg,
         activations_dataloader=dataloader,
         model=crosscoder.to(device),
         wandb_run=wandb_run,
