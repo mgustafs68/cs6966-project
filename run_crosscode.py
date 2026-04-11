@@ -16,17 +16,22 @@ import time
 import json
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, TypeVar, cast
 from dataclasses import dataclass, asdict
+
+from datasets import IterableDataset, load_dataset
 
 import torch
 from peft import PeftModel
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformer_lens import HookedTransformer
 from huggingface_hub import login
 
-from crosscode.data.activations_dataloader import build_model_hookpoint_dataloader
-from crosscode.log import logger
+from crosscode.data.activations_dataloader import (
+    ModelHookpointActivationsDataloader, 
+    TokenSequenceLoader,
+    ActivationsHarvester
+) 
 from crosscode.models import (
     AnthropicSTEJumpReLUActivation,
     DataDependentJumpReLUInitStrategy,
@@ -37,7 +42,7 @@ from crosscode.trainers.feb_update_diffing_crosscoder.jumprelu_trainer import (
     JumpReLUFebUpdateDiffingTrainer,
 )
 from crosscode.trainers.utils import build_wandb_run
-from crosscode.utils import get_device
+from crosscode.trainers.config_common import BaseTrainConfig
 
 # -----------------------------
 # Config
@@ -45,14 +50,15 @@ from crosscode.utils import get_device
 @dataclass
 class Config:
     policy_base_id: str                 = "google/gemma-2-2b"
-    clean_policy_adapter_path: str      = "outputs/policy_ppo/policy_20260406_224733"
-    buggy_policy_adapter_path: str      = "outputs/policy_ppo/policy_202604xx_xxxxxx"
+    rm_adapter_path: str                = "outputs/policy_ppo/policy_20260401_181337/final_model"
+    policy_adapter_path: str            = "outputs/policy_ppo/policy_20260401_162702/final_model"
     output_root: str                    = "outputs/crosscode"
-    cache_dir: Optional[Path]           = None
+    dataset_name: str                   = "lmsys/lmsys-chat-1m"
+    cache_dir: str                      = "cache"
     hookpoint: str                      = "blocks.14.hook_resid_pre"
-    dataset_name: str                   = "local_datasets/combined_policy_ab_dataset.csv"
     n_latents: int                      = 8192
     n_shared_latents: int               = 4096
+    sequence_length: int                = 2048
     initial_approx_firing_pct: float    = 0.01
     n_tokens_for_threshold_setting: int = 1_000_000
     bandwidth: float                    = 0.1
@@ -60,21 +66,28 @@ class Config:
     wandb_project: Optional[str]        = None
     wandb_entity: Optional[str]         = None
     batch_size: int                     = 8
+    shuffle_buffer_size: int | None     = None
+    yield_batch_size_B: int             = 1
+    n_tokens_for_norm_estimate: int     = 100_000
     seed: int                           = 42
 
 def parse_args() -> Config:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--clean_policy_adapter_path",      type=str, default=None)
-    parser.add_argument("--buggy_policy_adapter_path",      type=str, default=None)
+    parser.add_argument("--rm_adapter_path",                type=str, default=None)
+    parser.add_argument("--policy_adapter_path",            type=str, default=None)
     parser.add_argument("--output_root",                    type=str, default=None)
+    parser.add_argument("--dataset-name",                   type=str, default=None)
     parser.add_argument("--batch_size",                     type=int, default=None)
+    parser.add_argument("--yield_batch_size_B",             type=int, default=None)
     parser.add_argument("--cache-dir",                      type=Path, default=None)
     parser.add_argument("--hookpoint",                      type=str, default=None)
-    parser.add_argument("--dataset-name",                   type=str, default=None)
     parser.add_argument("--n-latents",                      type=int, default=None)
     parser.add_argument("--n-shared-latents",               type=int, default=None)
+    parser.add_argument("--sequence-length",                type=int, default=None)
     parser.add_argument("--initial-approx-firing-pct",      type=float, default=None)
     parser.add_argument("--n-tokens-for-threshold-setting", type=int, default=None)
+    parser.add_argument("--n-tokens-for-norm-estimate",     type=int, default=None)
+    parser.add_argument("--shuffle-buffer-size",            type=int, default=None)
     parser.add_argument("--bandwidth",                      type=float, default=None)
     parser.add_argument("--log-threshold-init",             type=float, default=None)
     parser.add_argument("--wandb-project",                  type=str, default=None)
@@ -191,98 +204,98 @@ def load_hooked_pair(
     device: torch.device,
     logger: Logger,
 ) -> Tuple[HookedTransformer, HookedTransformer]:
-    """Load clean and buggy policy models as HookedTransformers."""
+    """Load rewarnd and policy models as HookedTransformers."""
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
  
-    logger("Loading clean policy adapter and merging...")
-    clean_merged = load_and_merge(cfg.policy_base_id, cfg.clean_policy_adapter_path, dtype)
-    clean_merged.to(device)
-    llm_clean = to_hooked_transformer(clean_merged, device)
-    logger(f"  Clean policy loaded from: {cfg.clean_policy_adapter_path}")
+    logger("Loading rm adapter and merging...")
+    rm_merged = load_and_merge(cfg.policy_base_id, cfg.rm_adapter_path, dtype)
+    rm_merged.to(device)
+    llm_rm = to_hooked_transformer(rm_merged, device)
+    logger(f"  Reward model loaded from: {cfg.rm_adapter_path}")
  
-    logger("Loading buggy policy adapter and merging...")
-    buggy_merged = load_and_merge(cfg.policy_base_id, cfg.buggy_policy_adapter_path, dtype)
-    buggy_merged.to(device)
-    llm_buggy = to_hooked_transformer(buggy_merged, device)
-    logger(f"  Buggy policy loaded from: {cfg.buggy_policy_adapter_path}")
+    logger("Loading  policy adapter and merging...")
+    policy_merged = load_and_merge(cfg.policy_base_id, cfg.policy_adapter_path, dtype)
+    policy_merged.to(device)
+    llm_policy = to_hooked_transformer(policy_merged, device)
+    logger(f"  Policy model loaded from: {cfg.policy_adapter_path}")
  
-    return llm_clean, llm_buggy
+    return llm_rm, llm_policy
 
 
 # -----------------------------
 # Trainer assembly
 # -----------------------------
 
-def build_feb_diffing_trainer(
-    *,
-    llms: List[HookedTransformer],
-    hookpoint: str,
-    dataset_name: str,
-    cache_dir: Optional[Path],
-    batch_size: int,
-    n_latents: int,
-    n_shared_latents: int,
-    initial_approx_firing_pct: float,
-    n_tokens_for_threshold_setting: int,
-    bandwidth: float,
-    log_threshold_init: float,
-    use_encoder_bias: bool,
-    use_decoder_bias: bool,
-    device: torch.device,
-    wandb_project: Optional[str] = None,
-    wandb_entity: Optional[str] = None,
-):
-    """Build the crosscode dataloader, crosscoder, and Feb-diffing trainer."""
-    # NOTE: build_model_hookpoint_dataloader harvests activations from the models.
-    # The trainer itself never takes the LLMs directly.
-    dataloader = build_model_hookpoint_dataloader(
-        cfg=dataset_name,
-        llms=llms,
-        hookpoints=[hookpoint],
-        batch_size=batch_size,
-        cache_dir=str(cache_dir) if cache_dir is not None else None,
-    )
+# def build_feb_diffing_trainer(
+#     *,
+#     llms: List[HookedTransformer],
+#     hookpoint: str,
+#     dataset_name: str,
+#     cache_dir: Optional[Path],
+#     batch_size: int,
+#     n_latents: int,
+#     n_shared_latents: int,
+#     initial_approx_firing_pct: float,
+#     n_tokens_for_threshold_setting: int,
+#     bandwidth: float,
+#     log_threshold_init: float,
+#     use_encoder_bias: bool,
+#     use_decoder_bias: bool,
+#     device: torch.device,
+#     wandb_project: Optional[str] = None,
+#     wandb_entity: Optional[str] = None,
+# ):
+#     """Build the crosscode dataloader, crosscoder, and Feb-diffing trainer."""
+#     # NOTE: build_model_hookpoint_dataloader harvests activations from the models.
+#     # The trainer itself never takes the LLMs directly.
+#     dataloader = build_model_hookpoint_dataloader(
+#         cfg=dataset_name,
+#         llms=llms,
+#         hookpoints=[hookpoint],
+#         batch_size=batch_size,
+#         cache_dir=str(cache_dir) if cache_dir is not None else None,
+#     )
 
-    crosscoder = ModelHookpointAcausalCrosscoder(
-        n_models=len(llms),
-        n_hookpoints=1,
-        d_model=llms[0].cfg.d_model,
-        n_latents=n_latents,
-        init_strategy=IdenticalLatentsInit(
-            first_init=DataDependentJumpReLUInitStrategy(
-                activations_iterator=dataloader.get_activations_iterator(),
-                initial_approx_firing_pct=initial_approx_firing_pct,
-                n_tokens_for_threshold_setting=n_tokens_for_threshold_setting,
-                device=device,
-            ),
-            n_shared_latents=n_shared_latents,
-        ),
-        activation_fn=AnthropicSTEJumpReLUActivation(
-            size=n_latents,
-            bandwidth=bandwidth,
-            log_threshold_init=log_threshold_init,
-        ),
-        use_encoder_bias=use_encoder_bias,
-        use_decoder_bias=use_decoder_bias,
-    )
+#     crosscoder = ModelHookpointAcausalCrosscoder(
+#         n_models=len(llms),
+#         n_hookpoints=1,
+#         d_model=llms[0].cfg.d_model,
+#         n_latents=n_latents,
+#         init_strategy=IdenticalLatentsInit(
+#             first_init=DataDependentJumpReLUInitStrategy(
+#                 activations_iterator=dataloader.get_activations_iterator(),
+#                 initial_approx_firing_pct=initial_approx_firing_pct,
+#                 n_tokens_for_threshold_setting=n_tokens_for_threshold_setting,
+#                 device=device,
+#             ),
+#             n_shared_latents=n_shared_latents,
+#         ),
+#         activation_fn=AnthropicSTEJumpReLUActivation(
+#             size=n_latents,
+#             bandwidth=bandwidth,
+#             log_threshold_init=log_threshold_init,
+#         ),
+#         use_encoder_bias=use_encoder_bias,
+#         use_decoder_bias=use_decoder_bias,
+#     )
 
-    cfg = {
-        "minibatch_size": batch_size,
-        "gradient_accumulation_steps": 1,
-    }
+#     cfg = {
+#         "minibatch_size": batch_size,
+#         "gradient_accumulation_steps": 1,
+#     }
 
-    trainer = JumpReLUFebUpdateDiffingTrainer(
-        cfg=cfg,
-        activations_dataloader=dataloader,
-        model=crosscoder.to(device),
-        wandb_run=build_wandb_run(
-            type("WandBConfig", (), {"wandb_project": wandb_project, "wandb_entity": wandb_entity})()
-        ),
-        device=device,
-        save_dir=Path("./crosscode_runs"),
-        n_shared_latents=n_shared_latents,
-    )
-    return trainer
+#     trainer = JumpReLUFebUpdateDiffingTrainer(
+#         cfg=cfg,
+#         activations_dataloader=dataloader,
+#         model=crosscoder.to(device),
+#         wandb_run=build_wandb_run(
+#             type("WandBConfig", (), {"wandb_project": wandb_project, "wandb_entity": wandb_entity})()
+#         ),
+#         device=device,
+#         save_dir=Path("./crosscode_runs"),
+#         n_shared_latents=n_shared_latents,
+#     )
+#     return trainer
 
 
 def dtype_from_string(name: str) -> torch.dtype:
@@ -311,12 +324,48 @@ def build_trainer(
     at the specified hookpoint and yields them in matched pairs. The crosscoder
     then learns shared and model-specific latents from those pairs.
     """
-    dataloader = build_model_hookpoint_dataloader(
-        cfg=cfg.dataset_name,          # path to CSV or HF dataset name
-        llms=llms,
-        hookpoints=[cfg.hookpoint],
-        batch_size=cfg.batch_size,
-        cache_dir=cfg.cache_dir,
+    # data_cfg = DataConfig(
+    #     activations_harvester=ActivationsHarvesterConfig(
+    #         llms=#,
+    #         cache_mode="cache",
+    #         harvesting_batch_size=1,
+    #     ),
+    #     n_tokens_for_norm_estimate=1,
+    #     token_sequence_loader=HuggingfaceTextDatasetConfig(
+    #         hf_dataset_name="",
+    #         sequence_length=128,
+    #     ),
+    # )
+
+    ds = load_dataset(cfg.dataset_name, split="train", streaming=True)
+    tokenizer = AutoTokenizer.from_pretrained("google/gemma-2-2b-it")
+    def to_text(ex):
+        #text = "\n".join(f"{m['role']}: {m['content']}" for m in ex["conversation"])
+        text = tokenizer.apply_chat_template(
+            ex["conversation"],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        return {"text": text}
+    ds = ds.map(to_text)
+
+    dataloader = ModelHookpointActivationsDataloader(
+        token_sequence_loader=TokenSequenceLoader(
+            hf_dataset = ds,
+            tokenizer=AutoTokenizer.from_pretrained("google/gemma-2-2b"),
+            sequence_length=cfg.sequence_length,
+            batch_size=cfg.batch_size,
+            shuffle_buffer_size=cfg.shuffle_buffer_size,
+        ),
+        activations_harvester=ActivationsHarvester(
+            llms=llms,
+            hookpoints=[cfg.hookpoint],
+            activations_cache_dir=Path(cfg.cache_dir) / "activations_cache",
+            cache_mode="cache",
+        ),
+        yield_batch_size_B=cfg.yield_batch_size_B,
+        n_tokens_for_norm_estimate=cfg.n_tokens_for_norm_estimate,
+        shuffle_buffer_size=cfg.shuffle_buffer_size,
     )
  
     d_model = llms[0].cfg.d_model      # 2304 for Gemma-2 2B
@@ -344,10 +393,10 @@ def build_trainer(
         use_decoder_bias=True,
     )
  
-    trainer_cfg = {
-        "minibatch_size": cfg.batch_size,
-        "gradient_accumulation_steps": 1,
-    }
+    # trainer_cfg = {
+    #     "minibatch_size": cfg.batch_size,
+    #     "gradient_accumulation_steps": 1,
+    # }
  
     # build_wandb_run returns None if wandb_project is None
     # the trainer handles a None wandb_run gracefully.
@@ -359,7 +408,7 @@ def build_trainer(
     )
  
     trainer = JumpReLUFebUpdateDiffingTrainer(
-        cfg=trainer_cfg,
+        cfg=TypeVar("TConfig", bound=BaseTrainConfig),
         activations_dataloader=dataloader,
         model=crosscoder.to(device),
         wandb_run=wandb_run,
@@ -390,8 +439,8 @@ def main() -> None:
         json.dump(asdict(cfg), f, indent=2)
 
     custom_logger(f"Device : {device}")
-    custom_logger(f"Clean Policy : {cfg.clean_policy_adapter_path}")
-    custom_logger(f"Buggy Policy : {cfg.buggy_policy_adapter_path}")
+    custom_logger(f"Reward Model : {cfg.rm_adapter_path}")
+    custom_logger(f"Policy Model : {cfg.policy_adapter_path}")
     custom_logger(f"Output : {out_dir}\n")
 
     hf_token = os.environ.get("HF_TOKEN")
