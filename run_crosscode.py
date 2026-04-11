@@ -376,7 +376,7 @@ def build_trainer(
     dataloader = ModelHookpointActivationsDataloader(
         token_sequence_loader=TokenSequenceLoader(
             hf_dataset = ds,
-            tokenizer=AutoTokenizer.from_pretrained("google/gemma-2-2b"),
+            tokenizer=tokenizer,
             sequence_length=cfg.sequence_length,
             batch_size=cfg.batch_size,
             shuffle_buffer_size=cfg.shuffle_buffer_size,
