@@ -53,6 +53,8 @@ class Config:
     rm_adapter_path: str                = "outputs/policy_ppo/policy_20260401_181337/final_model"
     policy_adapter_path: str            = "outputs/policy_ppo/policy_20260401_162702/final_model"
     output_root: str                    = "outputs/crosscode"
+    rm_model_key: str                   = "rm_clean"
+    policy_model_key: str               = "policy_clean"
     dataset_name: str                   = "lmsys/lmsys-chat-1m"
     cache_dir: str                      = "cache"
     hookpoint: str                      = "blocks.14.hook_resid_pre"
@@ -76,6 +78,8 @@ def parse_args() -> Config:
     parser.add_argument("--rm_adapter_path",                type=str, default=None)
     parser.add_argument("--policy_adapter_path",            type=str, default=None)
     parser.add_argument("--output_root",                    type=str, default=None)
+    parser.add_argument("--rm-model-key",                   type=str, default=None)
+    parser.add_argument("--policy-model-key",               type=str, default=None)
     parser.add_argument("--dataset-name",                   type=str, default=None)
     parser.add_argument("--batch_size",                     type=int, default=None)
     parser.add_argument("--yield_batch_size_B",             type=int, default=None)
@@ -182,18 +186,29 @@ def load_and_merge(
 def to_hooked_transformer(
     merged_model: torch.nn.Module,
     device: torch.device,
+    model_key_str: str,
 ) -> HookedTransformer:
     """
     Wrap a merged HuggingFace causal LM as a TransformerLens HookedTransformer.
     `from_pretrained_no_processing` skips weight folding / centering that would
     change the activations — important for correctness when diffing two models.
     """
+    model_key = f"tl-{model_key_str}"
+
     dtype = next(merged_model.parameters()).dtype
     hooked = HookedTransformer.from_pretrained_no_processing(
         merged_model.config._name_or_path,
         hf_model=merged_model,
         dtype=dtype,
     )
+
+    # Replace any slashes with underscores to avoid potential path issues
+    model_key = model_key.replace("/", "_").replace("\\", "_")
+
+    # Register the model key as a buffer so it's properly accessible
+    # Buffers are persistent state in nn.Module that's not parameters
+    hooked.register_buffer("crosscode_model_key", torch.tensor([ord(c) for c in model_key], dtype=torch.int64))
+
     hooked.to(device)
     hooked.eval()
     return hooked
@@ -210,13 +225,13 @@ def load_hooked_pair(
     logger("Loading rm adapter and merging...")
     rm_merged = load_and_merge(cfg.policy_base_id, cfg.rm_adapter_path, dtype)
     rm_merged.to(device)
-    llm_rm = to_hooked_transformer(rm_merged, device)
+    llm_rm = to_hooked_transformer(rm_merged, device, cfg.rm_model_key)
     logger(f"  Reward model loaded from: {cfg.rm_adapter_path}")
  
     logger("Loading  policy adapter and merging...")
     policy_merged = load_and_merge(cfg.policy_base_id, cfg.policy_adapter_path, dtype)
     policy_merged.to(device)
-    llm_policy = to_hooked_transformer(policy_merged, device)
+    llm_policy = to_hooked_transformer(policy_merged, device, cfg.policy_model_key)
     logger(f"  Policy model loaded from: {cfg.policy_adapter_path}")
  
     return llm_rm, llm_policy
