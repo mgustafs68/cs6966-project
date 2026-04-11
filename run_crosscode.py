@@ -16,10 +16,10 @@ import time
 import json
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple, TypeVar, cast
+from typing import List, Optional, Tuple
 from dataclasses import dataclass, asdict
 
-from datasets import IterableDataset, load_dataset
+from datasets import load_dataset
 
 import torch
 from peft import PeftModel
@@ -39,8 +39,18 @@ from crosscode.models.initialization.diffing_identical_latents import IdenticalL
 from crosscode.trainers.feb_update_diffing_crosscoder.jumprelu_trainer import (
     JumpReLUFebUpdateDiffingTrainer,
 )
+from crosscode.trainers.feb_update_diffing_crosscoder.config import (
+    JumpReLUModelDiffingFebUpdateTrainConfig,
+)
+from crosscode.trainers.config_common import (
+    ActivationsHarvesterConfig,
+    AdamConfig, 
+    BaseExperimentConfig,
+    DataConfig,
+    LLMConfig,
+    WandbConfig
+)
 from crosscode.trainers.utils import build_wandb_run
-from crosscode.trainers.config_common import BaseTrainConfig
 
 # -----------------------------
 # Config
@@ -48,8 +58,8 @@ from crosscode.trainers.config_common import BaseTrainConfig
 @dataclass
 class Config:
     policy_base_id: str                 = "google/gemma-2-2b"
-    rm_adapter_path: str                = "outputs/policy_ppo/policy_20260401_181337/final_model"
-    policy_adapter_path: str            = "outputs/policy_ppo/policy_20260401_162702/final_model"
+    rm_adapter_path: str                = "outputs/correct_rm_clean_gemma2/run_20260327_135421/checkpoints/best_model"
+    policy_adapter_path: str            = "outputs/policy_ppo/policy_20260401_181337/final_model"
     output_root: str                    = "outputs/crosscode"
     rm_model_key: str                   = "rm_clean"
     policy_model_key: str               = "policy_clean"
@@ -59,8 +69,8 @@ class Config:
     n_latents: int                      = 8192
     n_shared_latents: int               = 4096
     sequence_length: int                = 2048
-    initial_approx_firing_pct: float    = 0.01
-    n_tokens_for_threshold_setting: int = 1_000_000
+    initial_approx_firing_pct: float    = 0.3
+    n_tokens_for_threshold_setting: int = 100_000 #increasing this significantly increases memory usage!
     bandwidth: float                    = 0.1
     log_threshold_init: float           = -4.0
     wandb_project: Optional[str]        = None
@@ -130,32 +140,6 @@ class Logger:
 # Model loader
 # -----------------------------
 
-# def load_merged_models(
-#     cfg: Config,
-#     device: torch.device,
-#     logger: Logger,
-# ) -> Tuple[torch.nn.Module, torch.nn.Module]:
-#     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-
-#     base_model = AutoModelForCausalLM.from_pretrained(cfg.policy_base_id, torch_dtype=dtype)
-#     clean_peft_model = PeftModel.from_pretrained(base_model, cfg.clean_policy_adapter_path, is_trainable=False)
-#     clean_merged_model = clean_peft_model.merge_and_unload()
-#     clean_merged_model.eval()
-#     for p in clean_merged_model.parameters():
-#         p.requires_grad_(False)
-#     clean_merged_model.to(device)
-#     logger(f"Loaded clean policy from: {cfg.clean_policy_adapter_path}")
-
-#     buggy_peft_model = PeftModel.from_pretrained(base_model, cfg.buggy_policy_adapter_path, is_trainable=False)
-#     buggy_merged_model = buggy_peft_model.merge_and_unload()
-#     buggy_merged_model.eval()
-#     for p in buggy_merged_model.parameters():
-#             p.requires_grad_(False)
-#     buggy_merged_model.to(device)
-#     logger(f"Loaded buggy policy from: {cfg.buggy_policy_adapter_path}")
-
-#     return clean_merged_model, buggy_merged_model
-
 def load_and_merge(
     base_id: str,
     adapter_path: str,
@@ -174,23 +158,6 @@ def load_and_merge(
         p.requires_grad_(False)
     return merged
 
-
-# def to_hooked_transformer(
-#     merged_model,
-#     *,
-#     device: torch.device,
-# ):
-#     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-#     """Wrap a merged HF causal LM as a HookedTransformer."""
-#     hooked = HookedTransformer.from_pretrained_no_processing(
-#         # The architecture name is inferred from the HF model; this matches the library's pattern.
-#         merged_model.config._name_or_path,
-#         hf_model=merged_model,
-#         dtype=dtype,
-#     )
-#     hooked.to(device)
-#     hooked.eval()
-#     return hooked
 
 def to_hooked_transformer(
     merged_model: torch.nn.Module,
@@ -246,91 +213,6 @@ def load_hooked_pair(
     return llm_rm, llm_policy
 
 
-# -----------------------------
-# Trainer assembly
-# -----------------------------
-
-# def build_feb_diffing_trainer(
-#     *,
-#     llms: List[HookedTransformer],
-#     hookpoint: str,
-#     dataset_name: str,
-#     cache_dir: Optional[Path],
-#     batch_size: int,
-#     n_latents: int,
-#     n_shared_latents: int,
-#     initial_approx_firing_pct: float,
-#     n_tokens_for_threshold_setting: int,
-#     bandwidth: float,
-#     log_threshold_init: float,
-#     use_encoder_bias: bool,
-#     use_decoder_bias: bool,
-#     device: torch.device,
-#     wandb_project: Optional[str] = None,
-#     wandb_entity: Optional[str] = None,
-# ):
-#     """Build the crosscode dataloader, crosscoder, and Feb-diffing trainer."""
-#     # NOTE: build_model_hookpoint_dataloader harvests activations from the models.
-#     # The trainer itself never takes the LLMs directly.
-#     dataloader = build_model_hookpoint_dataloader(
-#         cfg=dataset_name,
-#         llms=llms,
-#         hookpoints=[hookpoint],
-#         batch_size=batch_size,
-#         cache_dir=str(cache_dir) if cache_dir is not None else None,
-#     )
-
-#     crosscoder = ModelHookpointAcausalCrosscoder(
-#         n_models=len(llms),
-#         n_hookpoints=1,
-#         d_model=llms[0].cfg.d_model,
-#         n_latents=n_latents,
-#         init_strategy=IdenticalLatentsInit(
-#             first_init=DataDependentJumpReLUInitStrategy(
-#                 activations_iterator=dataloader.get_activations_iterator(),
-#                 initial_approx_firing_pct=initial_approx_firing_pct,
-#                 n_tokens_for_threshold_setting=n_tokens_for_threshold_setting,
-#                 device=device,
-#             ),
-#             n_shared_latents=n_shared_latents,
-#         ),
-#         activation_fn=AnthropicSTEJumpReLUActivation(
-#             size=n_latents,
-#             bandwidth=bandwidth,
-#             log_threshold_init=log_threshold_init,
-#         ),
-#         use_encoder_bias=use_encoder_bias,
-#         use_decoder_bias=use_decoder_bias,
-#     )
-
-#     cfg = {
-#         "minibatch_size": batch_size,
-#         "gradient_accumulation_steps": 1,
-#     }
-
-#     trainer = JumpReLUFebUpdateDiffingTrainer(
-#         cfg=cfg,
-#         activations_dataloader=dataloader,
-#         model=crosscoder.to(device),
-#         wandb_run=build_wandb_run(
-#             type("WandBConfig", (), {"wandb_project": wandb_project, "wandb_entity": wandb_entity})()
-#         ),
-#         device=device,
-#         save_dir=Path("./crosscode_runs"),
-#         n_shared_latents=n_shared_latents,
-#     )
-#     return trainer
-
-
-def dtype_from_string(name: str) -> torch.dtype:
-    mapping = {
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
-    }
-    return mapping[name]
-
-
 # ============================================================
 # Crosscoder + trainer assembly
 # ============================================================
@@ -348,23 +230,9 @@ def build_trainer(
     at the specified hookpoint and yields them in matched pairs. The crosscoder
     then learns shared and model-specific latents from those pairs.
     """
-    # data_cfg = DataConfig(
-    #     activations_harvester=ActivationsHarvesterConfig(
-    #         llms=#,
-    #         cache_mode="cache",
-    #         harvesting_batch_size=1,
-    #     ),
-    #     n_tokens_for_norm_estimate=1,
-    #     token_sequence_loader=HuggingfaceTextDatasetConfig(
-    #         hf_dataset_name="",
-    #         sequence_length=128,
-    #     ),
-    # )
-
     ds = load_dataset(cfg.dataset_name, split="train", streaming=True)
     tokenizer = AutoTokenizer.from_pretrained("google/gemma-2-2b-it")
     def to_text(ex):
-        #text = "\n".join(f"{m['role']}: {m['content']}" for m in ex["conversation"])
         text = tokenizer.apply_chat_template(
             ex["conversation"],
             tokenize=False,
@@ -372,6 +240,13 @@ def build_trainer(
         )
         return {"text": text}
     ds = ds.map(to_text)
+
+    data_cfg = DataConfig(
+        activations_harvester=ActivationsHarvesterConfig(
+            llms=[LLMConfig(name=cfg.rm_model_key), LLMConfig(name=cfg.policy_model_key)],
+            harvesting_batch_size=16,
+        )
+    )
 
     dataloader = ModelHookpointActivationsDataloader(
         token_sequence_loader=TokenSequenceLoader(
@@ -440,12 +315,17 @@ def build_trainer(
  
     # build_wandb_run returns None if wandb_project is None
     # the trainer handles a None wandb_run gracefully.
-    wandb_run = build_wandb_run(
-        type("WandBCfg", (), {
-            "wandb_project": cfg.wandb_project,
-            "wandb_entity":  cfg.wandb_entity,
-        })()
+    wandb_cfg = WandbConfig(
+        entity=cfg.wandb_entity or "your-username",
+        project=cfg.wandb_project or "default-project",
+        mode="disabled"
     )
+    exp_cfg = BaseExperimentConfig(
+        experiment_name="crosscoder",
+        wandb=wandb_cfg,
+        data=data_cfg,
+    )
+    wandb_run = build_wandb_run(exp_cfg)
  
     trainer = JumpReLUFebUpdateDiffingTrainer(
         cfg=trainer_cfg,
@@ -498,36 +378,6 @@ def main() -> None:
         device=device,
         save_dir=save_dir,
     )
-
-    # logger.info("Loading adapter A")
-    # custom_logger(f"Loading Clean Policy")
-    # merged_a = load_and_merge(cfg.policy_base_id, cfg.clean_policy_adapter_path, dtype)
-    # llm_a = to_hooked_transformer(merged_a, device=device, cache_dir=cfg.cache_dir, dtype=dtype)
-
-    # logger.info("Loading adapter B")
-    # custom_logger(f"Loading Buggy Policy")
-    # merged_b = load_and_merge(cfg.policy_base_id, cfg.buggy_policy_adapter_path, dtype)
-    # llm_b = to_hooked_transformer(merged_b, device=device, cache_dir=cfg.cache_dir, dtype=dtype)
-
-    # custom_logger(f"Loading Crosscoder Trainer")
-    # trainer = build_feb_diffing_trainer(
-    #     llms=[llm_a, llm_b],
-    #     hookpoint=cfg.hookpoint,
-    #     dataset_name=cfg.dataset_name,
-    #     cache_dir=cfg.cache_dir,
-    #     batch_size=cfg.batch_size,
-    #     n_latents=cfg.n_latents,
-    #     n_shared_latents=cfg.n_shared_latents,
-    #     initial_approx_firing_pct=cfg.initial_approx_firing_pct,
-    #     n_tokens_for_threshold_setting=cfg.n_tokens_for_threshold_setting,
-    #     bandwidth=cfg.bandwidth,
-    #     log_threshold_init=cfg.log_threshold_init,
-    #     use_encoder_bias=True,
-    #     use_decoder_bias=True,
-    #     device=device,
-    #     wandb_project=cfg.wandb_project,
-    #     wandb_entity=cfg.wandb_entity,
-    # )
     custom_logger("Starting crosscoder training...\n")
     # Crosscode trainers generally expose a train() / fit()-style method.
     # If your installed version uses a different name, this is the one line to adjust.
