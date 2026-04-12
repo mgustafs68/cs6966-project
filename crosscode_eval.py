@@ -58,6 +58,8 @@ class Config:
     # local eval data
     eval_data_path: str = "local_datasets/crosscoder_corpus/crosscoder_eval_megtong_chattemplate_32tok.csv"
 
+    tokenizer_id: str = "google/gemma-2-2b-it"
+
     cache_dir: str = "cache"
     hookpoint: str = "blocks.14.hook_resid_pre"
     sequence_length: int = 2048
@@ -71,7 +73,7 @@ class Config:
 def parse_args() -> Config:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint_dir", type=str, default=None)
-    parser.add_argument("--eval_csv_path", type=str, default=None)
+    parser.add_argument("--eval_data_path", type=str, default=None)
     parser.add_argument("--eval_jsonl_path", type=str, default=None)
     parser.add_argument("--hookpoint", type=str, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
@@ -79,6 +81,9 @@ def parse_args() -> Config:
     parser.add_argument("--sequence_length", type=int, default=None)
     parser.add_argument("--n_tokens_for_norm_estimate", type=int, default=None)
     parser.add_argument("--cache_dir", type=str, default=None)
+    parser.add_argument("--rm_adapter_path", type=str, default=None)
+    parser.add_argument("--policy_adapter_path", type=str, default=None)
+    parser.add_argument("--tokenizer_id", type=str, default=None)
 
     args = parser.parse_args()
     cfg = Config()
@@ -150,17 +155,17 @@ def load_hooked_pair(
 ) -> Tuple[HookedTransformer, HookedTransformer]:
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
-    logger("Loading clean policy adapter and merging...")
+    logger("Loading RM adapter and merging...")
     rm_merged = load_and_merge(cfg.policy_base_id, cfg.rm_adapter_path, dtype)
     rm_merged.to(device)
     llm_rm = to_hooked_transformer(rm_merged, device, cfg.rm_model_key)
-    logger(f"  Clean policy model loaded from: {cfg.rm_adapter_path}")
+    logger(f"  RM loaded from: {cfg.rm_adapter_path}")
 
-    logger("Loading buggy policy adapter and merging...")
+    logger("Loading policy adapter and merging...")
     policy_merged = load_and_merge(cfg.policy_base_id, cfg.policy_adapter_path, dtype)
     policy_merged.to(device)
     llm_policy = to_hooked_transformer(policy_merged, device, cfg.policy_model_key)
-    logger(f"  Buggy policy model loaded from: {cfg.policy_adapter_path}")
+    logger(f"  Policy loaded from: {cfg.policy_adapter_path}")
 
     return llm_rm, llm_policy
 
@@ -176,9 +181,19 @@ def evaluate(
     device: torch.device,
     logger: Logger,
 ):
-    tokenizer = llms[0].tokenizer
+    #explicitly load the tokenizer that matches how we built the eval corpus (apply_chat_template using Gemma IT), to guarantee consistent tokenization and avoids None tokenizer issues.
+    tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_id, use_fast=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     eval_ds = load_dataset("csv", data_files=cfg.eval_data_path, split="train", streaming=True)
+
+    def to_text_only(ex: dict) -> dict:
+        if "text" not in ex:
+            raise KeyError("Expected 'text' column in eval dataset, but not found.")
+        return {"text": ex["text"]}
+
+    eval_ds = eval_ds.map(to_text_only)
 
     dataloader = ModelHookpointActivationsDataloader(
         token_sequence_loader=TokenSequenceLoader(
@@ -221,6 +236,9 @@ def evaluate(
         total_latents += latents.numel()
         total_batches += 1
 
+        if total_batches % 50 == 0:
+            logger(f"  batches={total_batches} mse_so_far={total_sqerr/max(total_elements,1):.6e}")
+
     metrics = {
         "reconstruction_mse": total_sqerr / max(total_elements, 1),
         "mean_active_latent_fraction": total_active_latents / max(total_latents, 1),
@@ -247,8 +265,8 @@ def main() -> None:
 
     logger(f"Device : {device}")
     logger(f"Checkpoint : {cfg.checkpoint_dir}")
-    logger(f"Eval CSV : {cfg.eval_csv_path}")
-    logger(f"Eval JSONL : {cfg.eval_jsonl_path}")
+    logger(f"Eval data path: : {cfg.eval_data_path}")
+    logger(f"Tokenizer: {cfg.tokenizer_id}")
     logger(f"Output : {out_dir}\n")
 
     hf_token = os.environ.get("HF_TOKEN")
