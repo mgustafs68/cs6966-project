@@ -21,11 +21,11 @@ import os
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Tuple, List
 
 import torch
 import torch.nn.functional as F
-from datasets import IterableDataset, load_dataset
+from datasets import load_dataset
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformer_lens import HookedTransformer
@@ -170,6 +170,21 @@ def load_hooked_pair(
     return llm_rm, llm_policy
 
 
+@torch.inference_mode()
+def _encode_with_only_one_model(
+    crosscoder: ModelHookpointAcausalCrosscoder,
+    acts_BMPD: torch.Tensor,
+    model_idx: int,
+) -> torch.Tensor:
+    """
+    Keep the full [B, M, P, D] shape expected by the crosscoder, but zero out
+    all models except model_idx.
+    """
+    masked = torch.zeros_like(acts_BMPD)
+    masked[:, model_idx : model_idx + 1, ...] = acts_BMPD[:, model_idx : model_idx + 1, ...]
+    return crosscoder.forward_train(masked).latents_BL  # [B, L]
+
+
 # -----------------------------
 # Evaluation
 # -----------------------------
@@ -217,35 +232,120 @@ def evaluate(
     crosscoder.to(device)
     crosscoder.eval()
 
+    eps = 1e-8
+
     total_sqerr = 0.0
     total_elements = 0
-    total_latents = 0
-    total_active_latents = 0.0
     total_batches = 0
 
+    # RND accumulators, one value per latent
+    latent_sq_diff_sum = None   # sum over samples of (z_a - z_b)^2
+    latent_sq_a_sum = None      # sum over samples of z_a^2
+    latent_sq_b_sum = None      # sum over samples of z_b^2
+
+    # Optional extra diagnostics
+    latent_abs_a_sum = None
+    latent_abs_b_sum = None
+    latent_count = 0
+
     for batch in dataloader.get_activations_iterator():
-        acts = batch.activations_BMPD.to(device)  # [B, M, P, D]
+        acts_BMPD = batch.activations_BMPD.to(device)  # [B, M, P, D]
+        if acts_BMPD.shape[1] < 2:
+            raise ValueError(
+                f"Expected at least 2 models in activations_BMPD, got shape {tuple(acts_BMPD.shape)}"
+            )
 
-        out = crosscoder.forward_train(acts)
-        recon = out.recon_acts_BMPD
-        latents = out.latents_BL
+        # Joint reconstruction metric on both models together
+        out_joint = crosscoder.forward_train(acts_BMPD)
+        recon = out_joint.recon_acts_BMPD
 
-        total_sqerr += F.mse_loss(recon, acts, reduction="sum").item()
-        total_elements += acts.numel()
+        total_sqerr += F.mse_loss(recon, acts_BMPD, reduction="sum").item()
+        total_elements += acts_BMPD.numel()
 
-        total_active_latents += (latents > 0).float().sum().item()
-        total_latents += latents.numel()
+        # # Split activations by model and encode separately
+        # acts_a = acts_BMPD[:, 0:1, ...]  # keep model dim
+        # acts_b = acts_BMPD[:, 1:2, ...]
+
+        # out_a = crosscoder.forward_train(acts_a)
+        # out_b = crosscoder.forward_train(acts_b)
+
+        # z_a = out_a.latents_BL  # [B, L]
+        # z_b = out_b.latents_BL  # [B, L]
+        # Model-conditioned latent activations via ablation
+        z_a = _encode_with_only_one_model(crosscoder, acts_BMPD, model_idx=0)  # [B, L]
+        z_b = _encode_with_only_one_model(crosscoder, acts_BMPD, model_idx=1)  # [B, L]
+
+        if latent_sq_diff_sum is None:
+            latent_dim = z_a.shape[-1]
+            latent_sq_diff_sum = torch.zeros(latent_dim, device=device)
+            latent_sq_a_sum = torch.zeros(latent_dim, device=device)
+            latent_sq_b_sum = torch.zeros(latent_dim, device=device)
+            latent_abs_a_sum = torch.zeros(latent_dim, device=device)
+            latent_abs_b_sum = torch.zeros(latent_dim, device=device)
+
+        if z_a.shape[-1] != latent_sq_diff_sum.shape[0]:
+            raise ValueError(
+                f"Latent dim mismatch: got {z_a.shape[-1]} but expected {latent_sq_diff_sum.shape[0]}"
+            )
+
+        latent_sq_diff_sum += ((z_a - z_b) ** 2).sum(dim=0)
+        latent_sq_a_sum += (z_a ** 2).sum(dim=0)
+        latent_sq_b_sum += (z_b ** 2).sum(dim=0)
+        latent_abs_a_sum += z_a.abs().sum(dim=0)
+        latent_abs_b_sum += z_b.abs().sum(dim=0)
+
+        latent_count += z_a.shape[0]
         total_batches += 1
 
         if total_batches % 50 == 0:
-            logger(f"  batches={total_batches} mse_so_far={total_sqerr/max(total_elements,1):.6e}")
+            logger(
+                f"  batches={total_batches} "
+                f"mse_so_far={total_sqerr/max(total_elements,1):.6e}"
+            )
+
+    # Final per-latent RND
+    rnd = torch.sqrt(latent_sq_diff_sum) / (
+        torch.sqrt(latent_sq_a_sum) + torch.sqrt(latent_sq_b_sum) + eps
+    )
+
+    # Helpful extras for “exclusive to one model” style analysis
+    mean_abs_a = latent_abs_a_sum / max(latent_count, 1)
+    mean_abs_b = latent_abs_b_sum / max(latent_count, 1)
+    abs_gap = (mean_abs_a - mean_abs_b).abs()
+
+    # Optional: positive means model A dominates, negative means model B dominates
+    signed_preference = (mean_abs_a - mean_abs_b) / (mean_abs_a + mean_abs_b + eps)
+
+    topk = min(50, rnd.numel())
+    top_vals, top_idx = torch.topk(rnd, k=topk)
 
     metrics = {
         "reconstruction_mse": total_sqerr / max(total_elements, 1),
-        "mean_active_latent_fraction": total_active_latents / max(total_latents, 1),
         "batches": total_batches,
+        "latent_count": latent_count,
+        "rnd_mean": rnd.mean().item(),
+        "rnd_max": rnd.max().item(),
+        "rnd_top_50_indices": top_idx.tolist(),
+        "rnd_top_50_values": top_vals.tolist(),
     }
+
     logger(json.dumps(metrics, indent=2))
+
+    # Save a per-latent table for later inspection
+    out_table = {
+        "latent_idx": list(range(rnd.numel())),
+        "rnd": rnd.detach().cpu().tolist(),
+        "mean_abs_a": mean_abs_a.detach().cpu().tolist(),
+        "mean_abs_b": mean_abs_b.detach().cpu().tolist(),
+        "abs_gap": abs_gap.detach().cpu().tolist(),
+        "signed_preference": signed_preference.detach().cpu().tolist(),
+    }
+
+    out_path = Path(cfg.output_root) / "latest_rnd_latents.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(out_table, f, indent=2)
+
+    logger(f"Saved latent RND table to: {out_path}")
     return metrics
 
 
