@@ -8,7 +8,7 @@ import pandas as pd
 # ----------------------------
 # Config
 # ----------------------------
-INPUT_JSON = "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/latest_rnd_latents_clean.json"
+INPUT_JSON = "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/latest_rnd_latents_buggy.json"
 OUT_DIR = Path("./outputs/latent_labeling")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
