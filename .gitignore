@@ -1,9 +1,12 @@
 *.slurm
 *.out
 Makefile
+*.tar.gz
 
 /outputs/*
 !/outputs/policy_ppo/
 /outputs/policy_ppo/*
 !/outputs/policy_ppo/policy_20260401_162702/
 !/outputs/policy_ppo/policy_20260401_162702/**
+
+/local_datasets/crosscoders/*
