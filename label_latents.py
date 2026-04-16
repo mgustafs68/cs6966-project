@@ -8,20 +8,17 @@ import pandas as pd
 # ----------------------------
 # Config
 # ----------------------------
-INPUT_JSON = "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/latest_rnd_latents_buggy.json"
+INPUT_JSON = "/uufs/chpc.utah.edu/common/home/u1528744/interpretability/cs6966-project/latest_rnd_latents_clean.json"
 OUT_DIR = Path("./outputs/latent_labeling")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-OUT_JSONL = OUT_DIR / "example_buggy_latent_labels.jsonl"
-OUT_CSV   = OUT_DIR / "example_buggy_latent_labels.csv"
+OUT_JSONL = OUT_DIR / "latent_labels.jsonl"
+OUT_CSV   = OUT_DIR / "latent_labels.csv"
 
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 TOP_HITS_PER_LATENT = 30
 USE_RND_TOP50 = True
 MANUAL_LATENTS: Optional[List[int]] = None
-
-# NEW: how many token hits to show as examples
-EXAMPLES_K = 6
 
 # ----------------------------
 # Helpers
@@ -51,26 +48,6 @@ def pick_latents(obj: Dict[str, Any]) -> List[int]:
 def clean_token_str(s: str) -> str:
     return s.replace("\n", "\\n")
 
-def extract_examples_from_hits(latent: Dict[str, Any], k: int = EXAMPLES_K) -> str:
-    """
-    Build a compact examples string from the latent's top_hits token_str.
-    Deduplicates tokens while preserving order.
-    """
-    hits = latent.get("top_hits", []) or []
-    seen = set()
-    toks: List[str] = []
-    for h in hits:
-        tok = clean_token_str(str(h.get("token_str", "")).strip())
-        if not tok:
-            continue
-        if tok in seen:
-            continue
-        seen.add(tok)
-        toks.append(tok)
-        if len(toks) >= k:
-            break
-    return " | ".join(toks) if toks else ""
-
 def build_latent_card(latent: Dict[str, Any], k: int) -> str:
     idx = latent.get("latent_idx")
     rnd = latent.get("rnd")
@@ -85,6 +62,7 @@ def build_latent_card(latent: Dict[str, Any], k: int) -> str:
         act = h.get("activation", None)
         mdl = h.get("model", None)
         tid = h.get("token_id", None)
+        # act can be None; guard formatting
         act_str = f"{act:.4f}" if isinstance(act, (float, int)) else str(act)
         hit_lines.append(f"- act={act_str} model={mdl} token_id={tid} token_str={tok}")
 
@@ -127,16 +105,24 @@ def build_prompt(latent_card: str) -> str:
     return f"{SYSTEM_PROMPT}\n\nLATENT_CARD:\n{latent_card}\n\nJSON:"
 
 def extract_first_json_object(text: str) -> Optional[dict]:
+    """
+    LLMs sometimes wrap JSON with extra text.
+    This tries to find the first {...} block and parse it.
+    """
     text = text.strip()
+    # Fast path
     try:
         return json.loads(text)
     except Exception:
         pass
+
+    # Try to find a JSON object substring
     m = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if not m:
         return None
+    candidate = m.group(0)
     try:
-        return json.loads(m.group(0))
+        return json.loads(candidate)
     except Exception:
         return None
 
@@ -148,6 +134,7 @@ def label_with_transformers(prompts: List[str], model_id: str) -> List[str]:
     from transformers import AutoTokenizer, AutoModelForCausalLM
 
     tok_llm = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+    # Ensure pad token exists
     if tok_llm.pad_token is None:
         tok_llm.pad_token = tok_llm.eos_token
 
@@ -182,16 +169,15 @@ latent_map = index_latent_reports(obj)
 latent_ids = pick_latents(obj)
 
 latent_cards = []
-latent_examples = {}  # NEW: map latent_idx -> examples
 for lid in latent_ids:
     latent = latent_map.get(int(lid))
     if latent is None:
         continue
     card = build_latent_card(latent, TOP_HITS_PER_LATENT)
     latent_cards.append((int(lid), card))
-    latent_examples[int(lid)] = extract_examples_from_hits(latent, k=EXAMPLES_K)
 
 prompts = [build_prompt(card) for _, card in latent_cards]
+
 raw_outputs = label_with_transformers(prompts, MODEL_ID)
 
 rows = []
@@ -216,8 +202,6 @@ with open(OUT_JSONL, "w", encoding="utf-8") as f:
             "description": parsed.get("description"),
             "evidence": json.dumps(parsed.get("evidence", []), ensure_ascii=False),
             "notes": parsed.get("notes", ""),
-            # NEW column
-            "examples": latent_examples.get(lid, ""),
         }
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         rows.append(rec)
