@@ -1,30 +1,5 @@
 """
 search_sycophancy_latents.py
-=============================
-Addresses the professor's research question directly:
-
-  "Search top features shared between RM and policy — is there anything
-   about sycophancy? If yes, they might be propagating to the policy.
-   Search top features exclusive to RM — is there anything about sycophancy?
-   If yes, then they don't propagate to the policy."
-
-This script takes the partition CSV (from partition_latents_no_heuristics.py)
-and the latent labels CSV (from the latent labeling script) and produces:
-
-  1. A filtered table of VALID labeled latents per bucket
-     Valid = non-parse-error AND non-unknown category AND confidence >= MIN_CONFIDENCE
-
-  2. A sycophancy relevance score for each valid latent, computed by
-     keyword matching against the label, description, and token hits.
-     Keywords cover affirmation, agreement, stance-following, and negation-reversal.
-
-  3. A ranked output of sycophancy-relevant latents per bucket (shared vs exclusive)
-     for both clean and buggy pairs, which directly addresses the research question.
-
-  4. A summary table for the poster.
-
-Usage
------
   python search_sycophancy_latents.py --clean_partition_csv outputs/latent_partition/clean_pair_decoder_partitions.csv --buggy_partition_csv outputs/latent_partition/buggy_pair_decoder_partitions.csv --out_dir outputs/sycophancy_search
 """
 
